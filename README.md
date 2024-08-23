@@ -6,7 +6,7 @@
 
 CREATED By @kingkonfidents
 
-<img src="https://img.shields.io/badge/Version-1.0.0-blue.svg"></h2>
+<img src="[https://img.shields.io/badge/Version-1.0.0-blue.svg](https://img.shields.io/badge/Version-4.5-blue.svg)"></h2>
 
 </p>
 <h2 align="center"> Supported Linux Distribution</h2>
