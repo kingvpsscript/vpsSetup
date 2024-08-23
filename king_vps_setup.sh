@@ -590,9 +590,90 @@ change_port() {
             ;;
     esac
     
-    sed -i "s/^${service^^}_PORT=.*/${service^^}_PORT=$new_port/" "$CONFIG
-    else
-        echo "Usage: $0 [setup|admin]"
-        exit 1
-    fi
-fi
+    sed -i "s/^${service^^}_PORT=.*/${service^^}_PORT=$new_port/" "$CONFIG_FILE"
+    echo "Changed $service port to $new_port"
+}
+
+# Function to update domain
+update_domain() {
+    local new_domain=$1
+    sed -i "s/^DOMAIN=.*/DOMAIN=$new_domain/" "$CONFIG_FILE"
+    
+    certbot certonly --nginx -d $new_domain
+    
+    sed -i "s/server_name .*/server_name $new_domain;/" /etc/nginx/sites-available/websocket
+    
+    sed -i "s|cert = .*|cert = /etc/letsencrypt/live/$new_domain/fullchain.pem|" /etc/stunnel/stunnel.conf
+    sed -i "s|key = .*|key = /etc/letsencrypt/live/$new_domain/privkey.pem|" /etc/stunnel/stunnel.conf
+    
+    systemctl restart nginx stunnel4
+    
+    echo "Updated domain to $new_domain"
+}
+
+# Function to list configured ports
+list_ports() {
+    echo "Configured Ports:"
+    echo "----------------"
+    grep "_PORT=" "$CONFIG_FILE" | while read -r line; do
+        service=$(echo "$line" | cut -d'_' -f1)
+        port=$(echo "$line" | cut -d'=' -f2)
+        echo "$service: $port"
+    done
+}
+
+# Function to handle admin tasks
+admin_menu() {
+    while true; do
+        echo
+        echo "VPN Admin Menu"
+        echo "1. Add SSH User"
+        echo "2. Add V2Ray User"
+        echo "3. Change Port"
+        echo "4. Update Domain"
+        echo "5. List Configured Ports"
+        echo "6. Exit"
+        read -p "Enter your choice: " choice
+        
+        case $choice in
+            1)
+                read -p "Enter username for new SSH user: " username
+                read -s -p "Enter password for new SSH user: " password
+                echo
+                add_ssh_user "$username" "$password"
+                ;;
+            2)
+                read -p "Enter username for new V2Ray user: " username
+                add_v2ray_user "$username"
+                ;;
+            3)
+                read -p "Enter service name (v2ray/ssh/dropbear/ssl/websocket/python_proxy/badvpn): " service
+                read -p "Enter new port number: " new_port
+                change_port "$service" "$new_port"
+                ;;
+            4)
+                read -p "Enter new domain name: " new_domain
+                update_domain "$new_domain"
+                ;;
+            5)
+                list_ports
+                ;;
+            6)
+                return
+                ;;
+            *)
+                echo "Invalid choice. Please try again."
+                ;;
+        esac
+        
+        echo
+    done
+}
+
+# Call the admin_menu function
+admin_menu
+EOF
+
+    chmod +x "$ADMIN_SCRIPT"
+    echo "Created admin script: $ADMIN_SCRIPT"
+}
