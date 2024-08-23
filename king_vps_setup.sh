@@ -19,13 +19,13 @@ show_error() {
 # Function to get user input
 get_input() {
     read -p "$1: " input
-    echo $input
+    echo "$input"
 }
 
 # Function to get password input
 get_password() {
     read -s -p "$1: " password
-    echo $password
+    echo "$password"
 }
 
 # Function to get yes/no input
@@ -45,7 +45,7 @@ get_domain() {
     while true; do
         local domain=$(get_input "Enter your domain name (required)")
         if [ -n "$domain" ]; then
-            echo $domain
+            echo "$domain"
             return
         else
             show_error "Domain name is required. Please enter a valid domain."
@@ -59,22 +59,65 @@ install_components() {
     
     # Update system
     apt update && apt upgrade -y
-
     # Install required packages
-    apt install -y curl wget unzip jq python3 python3-pip nginx certbot python3-certbot-nginx uuid-runtime
-
+    apt install -y curl wget unzip jq python3 python3-pip nginx certbot python3-certbot-nginx uuid-runtime openssh-server
     # Install V2Ray
     bash <(curl -L https://raw.githubusercontent.com/v2fly/fhs-install-v2ray/master/install-release.sh)
-
     # Install BBR
     if ! lsmod | grep -q bbr; then
         echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
         echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
         sysctl -p
     fi
-
     # Install WebSocket to TCP proxy
     pip3 install websockify twisted
+
+    # Set up VPS admin interface
+    cp "$0" /usr/local/bin/vps_install.sh
+    chmod +x /usr/local/bin/vps_install.sh
+
+    cat > /usr/local/bin/vps_admin.sh <<EOF
+#!/bin/bash
+source /etc/vps_config.sh
+
+while true; do
+    read -p "Enter a command (type 'admin' for admin menu or 'exit' to quit): " command
+    case \$command in
+        admin)
+            admin_menu
+            ;;
+        exit)
+            echo "Exiting admin interface"
+            exit 0
+            ;;
+        *)
+            echo "Invalid command. Type 'admin' for admin menu or 'exit' to quit."
+            ;;
+    esac
+done
+EOF
+
+    chmod +x /usr/local/bin/vps_admin.sh
+
+    cat > /etc/systemd/system/vps_admin.service <<EOF
+[Unit]
+Description=VPS Admin Interface
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/vps_admin.sh
+Restart=always
+User=root
+StandardInput=tty
+StandardOutput=tty
+TTYPath=/dev/tty1
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl enable vps_admin.service
+    systemctl start vps_admin.service
 
     show_message "All components installed successfully!"
 }
@@ -83,16 +126,9 @@ install_components() {
 configure_v2ray() {
     show_message "Configuring V2Ray..."
     
-    VMESS_PORT=$(get_input "Enter VMess port (default: 10086)")
     VMESS_PORT=${VMESS_PORT:-10086}
-    
-    VLESS_PORT=$(get_input "Enter VLESS port (default: 10087)")
     VLESS_PORT=${VLESS_PORT:-10087}
-    
-    VMESS_WS_PATH=$(get_input "Enter VMess WebSocket path (default: /vmess)")
     VMESS_WS_PATH=${VMESS_WS_PATH:-/vmess}
-    
-    VLESS_WS_PATH=$(get_input "Enter VLESS WebSocket path (default: /vless)")
     VLESS_WS_PATH=${VLESS_WS_PATH:-/vless}
     
     VMESS_UUID=$(uuidgen)
@@ -135,7 +171,6 @@ configure_v2ray() {
   }]
 }
 EOF
-
     systemctl restart v2ray
     show_message "V2Ray configured successfully!"
 }
@@ -144,13 +179,8 @@ EOF
 configure_ssh() {
     show_message "Configuring SSH..."
     
-    SSH_PORT=$(get_input "Enter SSH port (default: 22)")
     SSH_PORT=${SSH_PORT:-22}
-    
-    SSH_WS_PORT=$(get_input "Enter SSH WebSocket port (default: 80)")
     SSH_WS_PORT=${SSH_WS_PORT:-80}
-    
-    SSH_WS_PATH=$(get_input "Enter SSH WebSocket path (default: /ssh)")
     SSH_WS_PATH=${SSH_WS_PATH:-/ssh}
 
     # Configure SSH
@@ -158,9 +188,8 @@ configure_ssh() {
     echo "AllowTcpForwarding yes" >> /etc/ssh/sshd_config
     echo "GatewayPorts yes" >> /etc/ssh/sshd_config
     echo "AllowUDPForwarding yes" >> /etc/ssh/sshd_config
-
     # Restart SSH service
-    systemctl restart sshd
+    systemctl restart ssh
 
     # Create WebSocket to TCP proxy service
     cat > /etc/systemd/system/websockify.service <<EOF
@@ -176,10 +205,8 @@ User=root
 [Install]
 WantedBy=multi-user.target
 EOF
-
     systemctl enable websockify
     systemctl start websockify
-
     show_message "SSH configured successfully!"
 }
 
@@ -195,13 +222,12 @@ configure_nginx() {
 server {
     listen 80;
     server_name $DOMAIN;
-    return 301 https://\$server_name\$request_uri;
+    return 301 https://$server_name$request_uri;
 }
 
 server {
     listen 443 ssl http2;
     server_name $DOMAIN;
-
     ssl_certificate /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/$DOMAIN/privkey.pem;
 
@@ -239,7 +265,6 @@ server {
     }
 }
 EOF
-
     ln -sf /etc/nginx/sites-available/v2ray /etc/nginx/sites-enabled/
     nginx -t && systemctl restart nginx
     show_message "Nginx configured successfully!"
@@ -249,7 +274,6 @@ EOF
 setup_python_proxy() {
     show_message "Setting up Python proxy..."
     
-    PROXY_PORT=$(get_input "Enter Python proxy port (default: 8080)")
     PROXY_PORT=${PROXY_PORT:-8080}
     
     # Create Python proxy script
@@ -289,10 +313,8 @@ User=root
 [Install]
 WantedBy=multi-user.target
 EOF
-
     systemctl enable python_proxy
     systemctl start python_proxy
-
     show_message "Python proxy set up successfully on port $PROXY_PORT!"
 }
 
@@ -302,14 +324,11 @@ add_ssh_user() {
     local password=$(get_password "Enter SSH password")
     echo
     local expiration_date=$(get_input "Enter expiration date (YYYY-MM-DD) or leave blank for no expiration")
-
     useradd -m -s /bin/bash "$username"
     echo "$username:$password" | chpasswd
-
     if [ -n "$expiration_date" ]; then
         chage -E "$expiration_date" "$username"
     fi
-
     show_message "SSH user $username added successfully!"
 }
 
@@ -336,12 +355,10 @@ add_v2ray_user() {
     local username=$(get_input "Enter username")
     local uuid=$(uuidgen)
     local expiration_date=$(get_input "Enter expiration date (YYYY-MM-DD) or leave blank for no expiration")
-
     if [ "$protocol" == "vmess" ] || [ "$protocol" == "vless" ]; then
         jq --arg protocol "$protocol" --arg username "$username" --arg uuid "$uuid" --arg exp "$expiration_date" \
         '.inbounds[] | select(.protocol == $protocol) | .settings.clients += [{"id": $uuid, "email": $username, "expiryTime": (if $exp != "" then ($exp | fromdateiso8601 | tostring) else null end)}]' \
         /usr/local/etc/v2ray/config.json > /tmp/v2ray_config.json && mv /tmp/v2ray_config.json /usr/local/etc/v2ray/config.json
-
         systemctl restart v2ray
         show_message "V2Ray user $username added successfully for $protocol protocol!"
         echo "UUID: $uuid"
@@ -364,12 +381,10 @@ list_v2ray_users() {
 remove_v2ray_user() {
     local protocol=$(get_input "Enter protocol (vmess/vless)")
     local username=$(get_input "Enter username to remove")
-
     if [ "$protocol" == "vmess" ] || [ "$protocol" == "vless" ]; then
         jq --arg protocol "$protocol" --arg username "$username" \
         '.inbounds[] | select(.protocol == $protocol) | .settings.clients = [.settings.clients[] | select(.email != $username)]' \
         /usr/local/etc/v2ray/config.json > /tmp/v2ray_config.json && mv /tmp/v2ray_config.json /usr/local/etc/v2ray/config.json
-
         systemctl restart v2ray
         show_message "V2Ray user $username removed successfully from $protocol protocol!"
     else
@@ -388,8 +403,7 @@ change_banner_message() {
         rm -f /etc/banner
         sed -i 's/^Banner .*/#Banner none/' /etc/ssh/sshd_config
     fi
-
-    systemctl restart sshd
+    systemctl restart ssh
     show_message "Banner message updated successfully!"
 }
 
@@ -421,7 +435,7 @@ display_config() {
 # Admin menu function
 admin_menu() {
     while true; do
-        echo -e "\n${YELLOW}Admin Menu:${NC}"
+        echo -e "\nAdmin Menu:"
         echo "1. Manage SSH Users"
         echo "2. Manage V2Ray Users"
         echo "3. Change V2Ray Ports"
@@ -432,7 +446,6 @@ admin_menu() {
         echo "8. Exit"
         
         local choice=$(get_input "Enter your choice")
-
         case $choice in
             1)
                 echo "1. Add SSH User"
@@ -487,7 +500,7 @@ admin_menu() {
                 esac
                 ;;
             7) display_config ;;
-            8) break ;;
+            8) return ;;
             *) show_error "Invalid choice" ;;
         esac
     done
@@ -502,26 +515,58 @@ install_and_configure() {
     configure_nginx
     setup_python_proxy
     add_ssh_user
+
+    # Save configurations to a file
+    cat > /etc/vps_config.sh <<EOF
+#!/bin/bash
+DOMAIN="$DOMAIN"
+VMESS_UUID="$VMESS_UUID"
+VMESS_PORT="$VMESS_PORT"
+VMESS_WS_PATH="$VMESS_WS_PATH"
+VLESS_UUID="$VLESS_UUID"
+VLESS_PORT="$VLESS_PORT"
+VLESS_WS_PATH="$VLESS_WS_PATH"
+SSH_PORT="$SSH_PORT"
+SSH_WS_PORT="$SSH_WS_PORT"
+SSH_WS_PATH="$SSH_WS_PATH"
+PROXY_PORT="$PROXY_PORT"
+
+$(declare -f show_message)
+$(declare -f show_error)
+$(declare -f get_input)
+$(declare -f get_password)
+$(declare -f get_yes_no)
+$(declare -f add_ssh_user)
+$(declare -f list_ssh_users)
+$(declare -f remove_ssh_user)
+$(declare -f add_v2ray_user)
+$(declare -f list_v2ray_users)
+$(declare -f remove_v2ray_user)
+$(declare -f change_banner_message)
+$(declare -f change_proxy_message)
+$(declare -f display_config)
+$(declare -f admin_menu)
+EOF
+
+    chmod +x /etc/vps_config.sh
+
     show_message "Installation and configuration completed successfully!"
     display_config
 }
 
 # Main script execution
 show_message "Welcome to KING VPS Management Script"
-
 if [ "$EUID" -ne 0 ]; then
     show_error "Please run as root"
-    exit
+    exit 1
 fi
 
 if get_yes_no "Do you want to install and configure the VPS?"; then
     install_and_configure
 fi
 
-if get_yes_no "Do you want to access the admin menu?"; then
-    admin_menu
-else
-    show_message "Exiting script"
-fi
+show_message "Setup complete. You can now access the admin menu by typing 'admin' in the VPS Admin Interface."
+show_message "To access the VPS Admin Interface, use 'sudo systemctl start vps_admin' or reboot your server."
+show_message "The interface will be available on TTY1 (Ctrl+Alt+F1 on most systems)."
 
-
+exit 0
