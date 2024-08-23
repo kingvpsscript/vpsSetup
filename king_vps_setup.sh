@@ -53,7 +53,7 @@ update_system() {
 # Function to install necessary packages
 install_packages() {
     log_message "Installing necessary packages..."
-    sudo apt install -y curl wget unzip net-tools python3 python3-pip dropbear stunnel4 nginx build-essential certbot python3-certbot-nginx
+    sudo apt install -y curl wget unzip net-tools python3 python3-pip dropbear stunnel4 nginx build-essential certbot python3-certbot-nginx jq
 }
 
 # Function to install and configure V2Ray
@@ -322,6 +322,20 @@ add_ssh_user() {
     echo "Added SSH user: $username"
 }
 
+# Function to list SSH users
+list_ssh_users() {
+    echo "SSH Users:"
+    echo "----------"
+    awk -F: '$3 >= 1000 && $1 != "nobody" {print $1}' /etc/passwd
+}
+
+# Function to remove SSH user
+remove_ssh_user() {
+    local username=$1
+    userdel -r "$username"
+    echo "Removed SSH user: $username"
+}
+
 # Function to add a V2Ray user
 add_v2ray_user() {
     local username=$1
@@ -333,6 +347,25 @@ add_v2ray_user() {
     
     systemctl restart v2ray
     echo "Added V2Ray user: $username with UUID: $uuid"
+}
+
+# Function to list V2Ray users
+list_v2ray_users() {
+    echo "V2Ray Users:"
+    echo "------------"
+    jq -r '.inbounds[0].settings.clients[] | .email' /usr/local/etc/v2ray/config.json
+}
+
+# Function to remove V2Ray user
+remove_v2ray_user() {
+    local username=$1
+    local config_file="/usr/local/etc/v2ray/config.json"
+    
+    jq --arg user "$username" '.inbounds[0].settings.clients = [.inbounds[0].settings.clients[] | select(.email != $user)]' "$config_file" > "$config_file.tmp"
+    mv "$config_file.tmp" "$config_file"
+    
+    systemctl restart v2ray
+    echo "Removed V2Ray user: $username"
 }
 
 # Function to change a port
@@ -463,11 +496,15 @@ admin_menu() {
         echo
         echo "VPN Admin Menu"
         echo "1. Add SSH User"
-        echo "2. Add V2Ray User"
-        echo "3. Change Port"
-        echo "4. Update Domain"
-        echo "5. List Configured Ports"
-        echo "6. Exit"
+        echo "2. List SSH Users"
+        echo "3. Remove SSH User"
+        echo "4. Add V2Ray User"
+        echo "5. List V2Ray Users"
+        echo "6. Remove V2Ray User"
+        echo "7. Change Port"
+        echo "8. Update Domain"
+        echo "9. List Configured Ports"
+        echo "10. Exit"
         read -p "Enter your choice: " choice
         
         case $choice in
@@ -478,22 +515,36 @@ admin_menu() {
                 add_ssh_user "$username" "$password"
                 ;;
             2)
+                list_ssh_users
+                ;;
+            3)
+                read -p "Enter username of SSH user to remove: " username
+                remove_ssh_user "$username"
+                ;;
+            4)
                 read -p "Enter username for new V2Ray user: " username
                 add_v2ray_user "$username"
                 ;;
-            3)
+            5)
+                list_v2ray_users
+                ;;
+            6)
+                read -p "Enter username of V2Ray user to remove: " username
+                remove_v2ray_user "$username"
+                ;;
+            7)
                 read -p "Enter service name (v2ray/ssh/dropbear/ssl/websocket/python_proxy/badvpn): " service
                 read -p "Enter new port number: " new_port
                 change_port "$service" "$new_port"
                 ;;
-            4)
+            8)
                 read -p "Enter new domain name: " new_domain
                 update_domain "$new_domain"
                 ;;
-            5)
+            9)
                 list_ports
                 ;;
-            6)
+            10)
                 return
                 ;;
             *)
