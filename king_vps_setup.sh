@@ -708,5 +708,3 @@ EOF
     echo "Created admin script: $ADMIN_SCRIPT"
 }
 
-# Run the main function
-main 
