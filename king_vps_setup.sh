@@ -1,120 +1,95 @@
 #!/bin/bash
 
-# Function to print messages in color
-print_msg() {
-    local color=$1
-    local msg=$2
-    case $color in
-        "red") echo -e "\033[31m$msg\033[0m" ;;
-        "green") echo -e "\033[32m$msg\033[0m" ;;
-        "yellow") echo -e "\033[33m$msg\033[0m" ;;
-        *) echo "$msg" ;;
-    esac
+# Global variables
+CONFIG_FILE="/root/server_config.conf"
+LOG_FILE="/var/log/server_setup.log"
+
+# Function to log messages
+log_message() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
+    echo "$1"
 }
 
-# Function to install a package if not already installed
-install_package() {
-    local package=$1
-    if ! dpkg -l | grep -q $package; then
-        print_msg "yellow" "Installing $package..."
-        apt install -y $package
-        if [ $? -ne 0 ]; then
-            print_msg "red" "Error installing $package."
-            exit 1
-        fi
-    else
-        print_msg "green" "$package is already installed."
-    fi
+# Function to get user input for ports
+get_port() {
+    local service=$1
+    local default=$2
+    read -p "Enter port for $service (default: $default): " port
+    echo ${port:-$default}
 }
 
-# Update and install necessary packages
-apt update && apt upgrade -y
-install_package "dropbear"
-install_package "v2ray"
-install_package "curl"
-install_package "nano"
-install_package "python3"
-install_package "python3-pip"
-
-# Functions to manage users
-add_user() {
-    read -p "Enter username: " username
-    if id "$username" &>/dev/null; then
-        print_msg "red" "User $username already exists."
-        return
-    fi
-    read -s -p "Enter password: " password
-    echo
-    useradd -m -s /bin/bash $username
-    echo "$username:$password" | chpasswd
-    if [ $? -ne 0 ]; then
-        print_msg "red" "Failed to add user $username."
-    else
-        print_msg "green" "User $username added successfully."
-    fi
+# Function to get yes/no input
+get_yes_no() {
+    while true; do
+        read -p "$1 (y/n): " yn
+        case $yn in
+            [Yy]* ) return 0;;
+            [Nn]* ) return 1;;
+            * ) echo "Please answer yes or no.";;
+        esac
+    done
 }
 
-delete_user() {
-    read -p "Enter username: " username
-    if ! id "$username" &>/dev/null; then
-        print_msg "red" "User $username does not exist."
-        return
-    fi
-    userdel -r $username
-    if [ $? -ne 0 ]; then
-        print_msg "red" "Failed to delete user $username."
-    else
-        print_msg "green" "User $username deleted successfully."
-    fi
+# Function to get a custom path
+get_custom_path() {
+    local service=$1
+    local default=$2
+    read -p "Enter custom path for $service (default: $default): " custom_path
+    echo ${custom_path:-$default}
 }
 
-list_users() {
-    print_msg "yellow" "Listing all users:"
-    cut -d: -f1 /etc/passwd
+# Function to update and upgrade system
+update_system() {
+    log_message "Updating and upgrading system..."
+    sudo apt update && sudo apt upgrade -y
 }
 
-# Function to configure ports
-configure_ports() {
-    read -p "Enter new SSH port: " ssh_port
-    read -p "Enter new Dropbear port: " dropbear_port
-    read -p "Enter new V2Ray port: " v2ray_port
+# Function to install necessary packages
+install_packages() {
+    log_message "Installing necessary packages..."
+    sudo apt install -y curl wget unzip net-tools python3 python3-pip dropbear stunnel4 nginx build-essential
+}
 
-    # Update SSH port
-    if [ ! -z "$ssh_port" ]; then
-        sed -i "s/#Port 22/Port $ssh_port/" /etc/ssh/sshd_config
-        systemctl restart sshd
-        print_msg "green" "SSH port updated to $ssh_port."
-    fi
+# Function to install and configure V2Ray
+install_v2ray() {
+    log_message "Installing and configuring V2Ray..."
+    bash <(curl -L https://raw.githubusercontent.com/v2fly/fhs-install-v2ray/master/install-release.sh)
     
-    # Update Dropbear port
-    if [ ! -z "$dropbear_port" ]; then
-        sed -i "s/DROPBEAR_PORT=22/DROPBEAR_PORT=$dropbear_port/" /etc/default/dropbear
-        systemctl restart dropbear
-        print_msg "green" "Dropbear port updated to $dropbear_port."
+    local uuid=$(uuidgen)
+    local config_file="/usr/local/etc/v2ray/config.json"
+    
+    # Generate V2Ray config based on TLS setting
+    if [ "$USE_TLS" = true ]; then
+        generate_v2ray_config_tls "$config_file" "$uuid"
+    else
+        generate_v2ray_config_no_tls "$config_file" "$uuid"
     fi
 
-    # Update V2Ray configuration
-    if [ ! -z "$v2ray_port" ]; then
-        sed -i "s/\"port\": .*/\"port\": $v2ray_port,/" /etc/v2ray/config.json
-        systemctl restart v2ray
-        print_msg "green" "V2Ray port updated to $v2ray_port."
+    if [ "$USE_TLS" = true ]; then
+        generate_v2ray_cert
     fi
+
+    systemctl start v2ray
+    systemctl enable v2ray
+    
+    echo "V2RAY_UUID=$uuid" >> "$CONFIG_FILE"
 }
 
-# Function to configure V2Ray VLESS
-configure_v2ray() {
-    cat <<EOF > /etc/v2ray/config.json
+# Function to generate V2Ray config with TLS
+generate_v2ray_config_tls() {
+    local config_file=$1
+    local uuid=$2
+    cat << EOF > "$config_file"
 {
   "inbounds": [
     {
-      "port": 443,
+      "port": $V2RAY_PORT,
       "protocol": "vless",
       "settings": {
         "clients": [
           {
-            "id": "$(uuidgen)",
-            "level": 1,
-            "email": "user@v2ray.com"
+            "id": "$uuid",
+            "level": 0
           }
         ],
         "decryption": "none"
@@ -122,183 +97,345 @@ configure_v2ray() {
       "streamSettings": {
         "network": "ws",
         "wsSettings": {
-          "path": "/vless"
+          "path": "$V2RAY_WS_PATH"
+        }
+      }
+    },
+    {
+      "port": $V2RAY_TLS_PORT,
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "$uuid",
+            "level": 0
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "certificates": [
+            {
+              "certificateFile": "/etc/v2ray/v2ray.crt",
+              "keyFile": "/etc/v2ray/v2ray.key"
+            }
+          ]
+        },
+        "wsSettings": {
+          "path": "$V2RAY_WS_PATH"
         }
       }
     }
   ],
   "outbounds": [
     {
-      "protocol": "freedom",
-      "settings": {}
+      "protocol": "freedom"
     }
   ]
 }
 EOF
-
-    systemctl restart v2ray
-    if [ $? -ne 0 ]; then
-        print_msg "red" "Failed to configure V2Ray VLESS."
-    else
-        print_msg "green" "V2Ray VLESS configured successfully."
-    fi
 }
 
-# Function to configure Python proxy
-configure_python_proxy() {
-    pip3 install -U proxy.py
-    cat <<EOF > /etc/systemd/system/python-proxy.service
+# Function to generate V2Ray config without TLS
+generate_v2ray_config_no_tls() {
+    local config_file=$1
+    local uuid=$2
+    cat << EOF > "$config_file"
+{
+  "inbounds": [
+    {
+      "port": $V2RAY_PORT,
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "$uuid",
+            "level": 0
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "ws",
+        "wsSettings": {
+          "path": "$V2RAY_WS_PATH"
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "freedom"
+    }
+  ]
+}
+EOF
+}
+
+# Function to generate V2Ray self-signed certificate
+generate_v2ray_cert() {
+    log_message "Generating self-signed certificate for V2Ray TLS..."
+    openssl req -new -newkey rsa:4096 -days 365 -nodes -x509 \
+        -subj "/C=US/ST=State/L=City/O=Organization/CN=localhost" \
+        -keyout /etc/v2ray/v2ray.key -out /etc/v2ray/v2ray.crt
+}
+
+# Function to configure SSH
+configure_ssh() {
+    log_message "Configuring SSH..."
+    sed -i "s/#Port 22/Port $SSH_PORT/" /etc/ssh/sshd_config
+    if [ ! -z "$SSH_BANNER" ]; then
+        echo "$SSH_BANNER" > /etc/ssh/banner
+        echo "Banner /etc/ssh/banner" >> /etc/ssh/sshd_config
+    fi
+    systemctl restart sshd
+}
+
+# Function to configure Dropbear
+configure_dropbear() {
+    log_message "Configuring Dropbear..."
+    sed -i "s/NO_START=1/NO_START=0/" /etc/default/dropbear
+    sed -i "s/DROPBEAR_PORT=22/DROPBEAR_PORT=$DROPBEAR_PORT/" /etc/default/dropbear
+    if [ ! -z "$SSH_BANNER" ]; then
+        echo "DROPBEAR_BANNER=\"/etc/ssh/banner\"" >> /etc/default/dropbear
+    fi
+    systemctl restart dropbear
+}
+
+# Function to configure SSL
+configure_ssl() {
+    log_message "Configuring SSL..."
+    cat << EOF > /etc/stunnel/stunnel.conf
+pid = /var/run/stunnel.pid
+cert = /etc/stunnel/stunnel.pem
+client = no
+socket = l:TCP_NODELAY=1
+socket = r:TCP_NODELAY=1
+
+[dropbear]
+accept = $SSL_PORT
+connect = 127.0.0.1:$DROPBEAR_PORT
+EOF
+
+    openssl req -new -newkey rsa:2048 -days 3650 -nodes -x509 \
+        -subj "/C=US/ST=State/L=City/O=Organization/CN=localhost" \
+        -keyout /etc/stunnel/stunnel.pem -out /etc/stunnel/stunnel.pem
+
+    systemctl restart stunnel4
+}
+
+# Function to configure Nginx for WebSocket
+configure_nginx() {
+    log_message "Configuring Nginx for WebSocket..."
+    cat << EOF > /etc/nginx/sites-available/websocket
+server {
+    listen $WEBSOCKET_PORT;
+    server_name localhost;
+
+    location $V2RAY_WS_PATH {
+        proxy_redirect off;
+        proxy_pass http://127.0.0.1:$V2RAY_PORT;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$http_host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    }
+
+    location $SSH_WS_PATH {
+        proxy_redirect off;
+        proxy_pass http://127.0.0.1:$SSH_PORT;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$http_host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    }
+}
+EOF
+
+    ln -s /etc/nginx/sites-available/websocket /etc/nginx/sites-enabled/
+    nginx -t && systemctl restart nginx
+}
+
+# Function to setup Python Proxy
+setup_python_proxy() {
+    log_message "Setting up Python Proxy..."
+    pip3 install proxy.py
+
+    cat << EOF > /root/custom_proxy.py
+import time
+from proxy import ProxyServer, ProxyHandler
+
+class CustomHandler(ProxyHandler):
+    def handle_client_request(self, request):
+        if request.method == 'CONNECT':
+            self.send_response(200, 'Connection Established')
+            self.send_header('Proxy-Agent', 'Custom Python Proxy')
+            self.end_headers()
+        else:
+            super().handle_client_request(request)
+
+    def handle_client_connection(self, conn, addr):
+        conn.sendall(b"HTTP/1.1 101 Switching Protocols\r\n")
+        conn.sendall(b"Upgrade: websocket\r\n")
+        conn.sendall(b"Connection: Upgrade\r\n")
+        conn.sendall(f"X-Proxy-Message: {PYTHON_PROXY_MESSAGE}\r\n".encode())
+        conn.sendall(b"\r\n")
+        super().handle_client_connection(conn, addr)
+
+if __name__ == '__main__':
+    proxy = ProxyServer(hostname='0.0.0.0', port=$PYTHON_PROXY_PORT, handler_class=CustomHandler)
+    proxy.run()
+EOF
+
+    create_systemd_service "python-proxy" "/usr/bin/python3 /root/custom_proxy.py"
+}
+
+# Function to install and configure BadVPN
+setup_badvpn() {
+    log_message "Setting up BadVPN..."
+    wget -O /usr/bin/badvpn-udpgw "https://raw.githubusercontent.com/daybreakersx/premscript/master/badvpn-udpgw64"
+    chmod +x /usr/bin/badvpn-udpgw
+
+    create_systemd_service "badvpn" "/usr/bin/badvpn-udpgw --listen-addr 127.0.0.1:$BADVPN_PORT --max-clients 1000 --max-connections-for-client 10"
+}
+
+# Function to create a systemd service
+create_systemd_service() {
+    local service_name=$1
+    local exec_start=$2
+
+    cat << EOF > /etc/systemd/system/${service_name}.service
 [Unit]
-Description=Python Proxy
+Description=$service_name
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/proxy
-Restart=on-failure
+ExecStart=$exec_start
+Restart=always
+User=root
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-    systemctl enable python-proxy
-    systemctl start python-proxy
-    if [ $? -ne 0 ]; then
-        print_msg "red" "Failed to configure Python proxy."
+    systemctl start $service_name
+    systemctl enable $service_name
+}
+
+# Function to optimize system performance
+optimize_system() {
+    log_message "Optimizing system performance..."
+    echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+    echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+    sysctl -p
+
+    echo "* soft nofile 51200" >> /etc/security/limits.conf
+    echo "* hard nofile 51200" >> /etc/security/limits.conf
+
+    sed -i 's/worker_processes.*/worker_processes auto;/' /etc/nginx/nginx.conf
+    sed -i 's/# multi_accept.*/multi_accept on;/' /etc/nginx/nginx.conf
+    sed -i 's/# tcp_nopush.*/tcp_nopush on;/' /etc/nginx/nginx.conf
+    sed -i 's/# tcp_nodelay.*/tcp_nodelay on;/' /etc/nginx/nginx.conf
+    systemctl restart nginx
+}
+
+# Function to display connection information
+display_info() {
+    local server_ip=$(curl -s ifconfig.me)
+    local v2ray_uuid=$(grep V2RAY_UUID "$CONFIG_FILE" | cut -d= -f2)
+
+    echo "----------------------------------------"
+    echo "Server Setup Complete"
+    echo "----------------------------------------"
+    echo "V2Ray VLESS: Port $V2RAY_PORT, Path $V2RAY_WS_PATH"
+    [ "$USE_TLS" = true ] && echo "V2Ray VLESS (TLS): Port $V2RAY_TLS_PORT, Path $V2RAY_WS_PATH"
+    echo "SSH: Port $SSH_PORT"
+    echo "SSH WebSocket: Path $SSH_WS_PATH"
+    echo "Dropbear: Port $DROPBEAR_PORT"
+    echo "SSL: Port $SSL_PORT"
+    echo "WebSocket: Port $WEBSOCKET_PORT"
+    echo "Python Proxy: Port $PYTHON_PROXY_PORT"
+    echo "BadVPN: Port $BADVPN_PORT"
+    echo "V2Ray UUID: $v2ray_uuid"
+    echo "Server IP: $server_ip"
+    echo "Python Proxy 101 Protocol Message: $PYTHON_PROXY_MESSAGE"
+    echo "----------------------------------------"
+    echo "Configuration saved in $CONFIG_FILE"
+    echo "Log file: $LOG_FILE"
+    echo "----------------------------------------"
+}
+
+# Main function
+main() {
+    log_message "Starting server setup..."
+
+    # Get user input
+    V2RAY_PORT=$(get_port "V2Ray" 10086)
+    SSH_PORT=$(get_port "SSH" 22)
+    DROPBEAR_PORT=$(get_port "Dropbear" 444)
+    SSL_PORT=$(get_port "SSL" 443)
+    WEBSOCKET_PORT=$(get_port "WebSocket" 80)
+    PYTHON_PROXY_PORT=$(get_port "Python Proxy" 8080)
+    BADVPN_PORT=$(get_port "BadVPN" 7300)
+
+    V2RAY_WS_PATH=$(get_custom_path "V2Ray WebSocket" "/v2ray")
+    SSH_WS_PATH=$(get_custom_path "SSH WebSocket" "/ssh")
+
+    if get_yes_no "Do you want to enable TLS for V2Ray?"; then
+        USE_TLS=true
+        V2RAY_TLS_PORT=$(get_port "V2Ray TLS" 443)
     else
-        print_msg "green" "Python proxy configured successfully."
+        USE_TLS=false
     fi
-}
 
-# Function to configure SSH banner
-configure_ssh_banner() {
-    cat <<'EOF' > /etc/issue.net
-Welcome to your server!
-Unauthorized access is prohibited.
-EOF
-
-    sed -i 's/#Banner none/Banner \/etc\/issue.net/' /etc/ssh/sshd_config
-    systemctl restart sshd
-    if [ $? -ne 0 ]; then
-        print_msg "red" "Failed to configure SSH banner."
-    else
-        print_msg "green" "SSH banner configured successfully."
+    if get_yes_no "Do you want to set up an SSH banner message?"; then
+        read -p "Enter your SSH banner message: " SSH_BANNER
     fi
+
+    read -p "Enter your Python proxy 101 protocol message (default: Welcome to Python Proxy): " PYTHON_PROXY_MESSAGE
+    PYTHON_PROXY_MESSAGE=${PYTHON_PROXY_MESSAGE:-"Welcome to Python Proxy"}
+
+    # Save configuration
+    {
+        echo "V2RAY_PORT=$V2RAY_PORT"
+        echo "SSH_PORT=$SSH_PORT"
+        echo "DROPBEAR_PORT=$DROPBEAR_PORT"
+        echo "SSL_PORT=$SSL_PORT"
+        echo "WEBSOCKET_PORT=$WEBSOCKET_PORT"
+        echo "PYTHON_PROXY_PORT=$PYTHON_PROXY_PORT"
+        echo "BADVPN_PORT=$BADVPN_PORT"
+        echo "V2RAY_WS_PATH=$V2RAY_WS_PATH"
+        echo "SSH_WS_PATH=$SSH_WS_PATH"
+        echo "USE_TLS=$USE_TLS"
+        [ "$USE_TLS" = true ] && echo "V2RAY_TLS_PORT=$V2RAY_TLS_PORT"
+        [ ! -z "$SSH_BANNER" ] && echo "SSH_BANNER=$SSH_BANNER"
+        echo "PYTHON_PROXY_MESSAGE=$PYTHON_PROXY_MESSAGE"
+    } > "$CONFIG_FILE"
+
+    # Perform setup steps
+    update_system
+    install_packages
+    install_v2ray
+    configure_ssh
+    configure_dropbear
+    configure_ssl
+    configure_nginx
+    setup_python_proxy
+    setup_badvpn
+    optimize_system
+
+    # Display setup information
+    display_info
+
+    log_message "Server setup completed successfully."
 }
 
-# Function to configure Python proxy banner
-configure_python_proxy_banner() {
-    cat <<'EOF' > /etc/python-proxy-banner.txt
-Welcome to the Python Proxy service!
-Unauthorized access is prohibited.
-EOF
-    print_msg "green" "Python proxy banner configured. Apply it in your proxy configuration as needed."
-}
-
-# Admin menu
-admin_menu() {
-    PS3='Please enter your choice: '
-    options=("Add User" "Delete User" "List Users" "Configure Ports" "Configure V2Ray" "Configure Python Proxy" "Configure SSH Banner" "Configure Python Proxy Banner" "Quit")
-    select opt in "${options[@]}"
-    do
-        case $opt in
-            "Add User")
-                add_user
-                ;;
-            "Delete User")
-                delete_user
-                ;;
-            "List Users")
-                list_users
-                ;;
-            "Configure Ports")
-                configure_ports
-                ;;
-            "Configure V2Ray")
-                configure_v2ray
-                ;;
-            "Configure Python Proxy")
-                configure_python_proxy
-                ;;
-            "Configure SSH Banner")
-                configure_ssh_banner
-                ;;
-            "Configure Python Proxy Banner")
-                configure_python_proxy_banner
-                ;;
-            "Quit")
-                break
-                ;;
-            *) print_msg "red" "Invalid option $REPLY";;
-        esac
-    done
-}
-
-# Initial setup
-print_msg "yellow" "Configuring Dropbear..."
-sed -i 's/NO_START=1/NO_START=0/' /etc/default/dropbear
-sed -i 's/DROPBEAR_PORT=22/DROPBEAR_PORT=4422/' /etc/default/dropbear
-systemctl enable dropbear
-systemctl start dropbear
-
-print_msg "yellow" "Setting up V2Ray..."
-curl -L -o /etc/v2ray/v2ray.zip https://github.com/v2ray/v2ray-core/releases/download/v4.27.0/v2ray-linux-64.zip
-unzip /etc/v2ray/v2ray.zip -d /etc/v2ray/
-chmod +x /etc/v2ray/v2ray /etc/v2ray/v2ctl
-configure_v2ray
-
-print_msg "yellow" "Configuring Python proxy..."
-configure_python_proxy
-
-print_msg "yellow" "Configuring SSH banner..."
-configure_ssh_banner
-
-print_msg "yellow" "Configuring Python proxy banner..."
-configure_python_proxy_banner
-
-print_msg "yellow" "Starting admin menu..."
-admin_menu
-
-# Create a script for the admin menu that can be run anytime
-cat <<'EOF' > /usr/local/bin/admin_menu.sh
-#!/bin/bash
-
-PS3='Please enter your choice: '
-options=("Add User" "Delete User" "List Users" "Configure Ports" "Configure V2Ray" "Configure Python Proxy" "Configure SSH Banner" "Configure Python Proxy Banner" "Quit")
-select opt in "${options[@]}"
-do
-    case $opt in
-        "Add User")
-            sudo add_user
-            ;;
-        "Delete User")
-            sudo delete_user
-            ;;
-        "List Users")
-            sudo list_users
-            ;;
-        "Configure Ports")
-            sudo configure_ports
-            ;;
-        "Configure V2Ray")
-            sudo configure_v2ray
-            ;;
-        "Configure Python Proxy")
-            sudo configure_python_proxy
-            ;;
-        "Configure SSH Banner")
-            sudo configure_ssh_banner
-            ;;
-        "Configure Python Proxy Banner")
-            sudo configure_python_proxy_banner
-            ;;
-        "Quit")
-            break
-            ;;
-        *) echo "Invalid option $REPLY";;
-    esac
-done
-EOF
-
-chmod +x /usr/local/bin/admin_menu.sh
-
-print_msg "green" "Admin menu can be accessed anytime by running: sudo /usr/local/bin/admin_menu.sh"
+# Run the main function
+main
