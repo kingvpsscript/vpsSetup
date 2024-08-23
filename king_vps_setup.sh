@@ -538,3 +538,5 @@ EOF
     chmod +x "$ADMIN_SCRIPT"
     log_message "Created admin script: $ADMIN_SCRIPT"
 }
+
+main
