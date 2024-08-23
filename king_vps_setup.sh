@@ -3,7 +3,6 @@
 # Global variables
 CONFIG_FILE="/root/server_config.conf"
 LOG_FILE="/var/log/server_setup.log"
-ADMIN_SCRIPT="/usr/local/bin/vpn_admin"
 
 # Function to log messages
 log_message() {
@@ -314,14 +313,6 @@ optimize_system() {
     systemctl restart nginx
 }
 
-# Function to create the admin script
-create_admin_script() {
-    cat << 'EOF' > "$ADMIN_SCRIPT"
-#!/bin/bash
-
-CONFIG_FILE="/root/server_config.conf"
-source "$CONFIG_FILE"
-
 # Function to add an SSH user
 add_ssh_user() {
     local username=$1
@@ -410,11 +401,60 @@ update_domain() {
 list_ports() {
     echo "Configured Ports:"
     echo "----------------"
-        grep "_PORT=" "$CONFIG_FILE" | while read -r line; do
+    grep "_PORT=" "$CONFIG_FILE" | while read -r line; do
         service=$(echo "$line" | cut -d'_' -f1)
         port=$(echo "$line" | cut -d'=' -f2)
         echo "$service: $port"
     done
+}
+
+# Main function to run the setup
+main() {
+    log_message "Starting VPN server setup..."
+
+    # Get user inputs
+    DOMAIN=$(get_domain)
+    USE_TLS=$(get_yes_no "Use TLS?")
+    V2RAY_PORT=$(get_port "V2Ray" 8443)
+    SSH_PORT=$(get_port "SSH" 22)
+    DROPBEAR_PORT=$(get_port "Dropbear" 444)
+    SSL_PORT=$(get_port "SSL" 443)
+    PYTHON_PROXY_PORT=$(get_port "Python Proxy" 8080)
+    BADVPN_PORT=$(get_port "BadVPN" 7300)
+    V2RAY_WS_PATH=$(get_custom_path "V2Ray WebSocket" "/v2ray")
+    SSH_WS_PATH=$(get_custom_path "SSH WebSocket" "/ssh")
+
+    # Save configuration
+    cat << EOF > "$CONFIG_FILE"
+DOMAIN=$DOMAIN
+USE_TLS=$USE_TLS
+V2RAY_PORT=$V2RAY_PORT
+SSH_PORT=$SSH_PORT
+DROPBEAR_PORT=$DROPBEAR_PORT
+SSL_PORT=$SSL_PORT
+PYTHON_PROXY_PORT=$PYTHON_PROXY_PORT
+BADVPN_PORT=$BADVPN_PORT
+V2RAY_WS_PATH=$V2RAY_WS_PATH
+SSH_WS_PATH=$SSH_WS_PATH
+EOF
+
+    # Update and install packages
+    update_system
+    install_packages
+
+    # Setup services
+    install_v2ray
+    configure_ssh
+    configure_dropbear
+    configure_ssl
+    configure_nginx
+    setup_python_proxy
+    setup_badvpn
+
+    # Optimize system
+    optimize_system
+
+    log_message "VPN server setup completed successfully."
 }
 
 # Function to handle admin tasks
@@ -465,72 +505,12 @@ admin_menu() {
     done
 }
 
-# Call the admin_menu function
-admin_menu
-EOF
-
-    chmod +x "$ADMIN_SCRIPT"
-    echo "Created admin script: $ADMIN_SCRIPT"
-}
-
-# Main function to run the setup
-main() {
-    log_message "Starting VPN server setup..."
-
-    # Get user inputs
-    DOMAIN=$(get_domain)
-    USE_TLS=$(get_yes_no "Use TLS?")
-    V2RAY_PORT=$(get_port "V2Ray" 8443)
-    SSH_PORT=$(get_port "SSH" 22)
-    DROPBEAR_PORT=$(get_port "Dropbear" 444)
-    SSL_PORT=$(get_port "SSL" 443)
-    PYTHON_PROXY_PORT=$(get_port "Python Proxy" 8080)
-    BADVPN_PORT=$(get_port "BadVPN" 7300)
-    V2RAY_WS_PATH=$(get_custom_path "V2Ray WebSocket" "/v2ray")
-    SSH_WS_PATH=$(get_custom_path "SSH WebSocket" "/ssh")
-
-    # Save configuration
-    cat << EOF > "$CONFIG_FILE"
-DOMAIN=$DOMAIN
-USE_TLS=$USE_TLS
-V2RAY_PORT=$V2RAY_PORT
-SSH_PORT=$SSH_PORT
-DROPBEAR_PORT=$DROPBEAR_PORT
-SSL_PORT=$SSL_PORT
-PYTHON_PROXY_PORT=$PYTHON_PROXY_PORT
-BADVPN_PORT=$BADVPN_PORT
-V2RAY_WS_PATH=$V2RAY_WS_PATH
-SSH_WS_PATH=$SSH_WS_PATH
-EOF
-
-    # Update and install packages
-    update_system
-    install_packages
-
-    # Setup services
-    install_v2ray
-    configure_ssh
-    configure_dropbear
-    configure_ssl
-    configure_nginx
-    setup_python_proxy
-    setup_badvpn
-
-    # Optimize system
-    optimize_system
-
-    # Create admin script
-    create_admin_script
-
-    log_message "VPN server setup completed successfully."
-}
-
 # Run the main function if the script is executed directly
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     if [ "$1" = "setup" ]; then
         main
     elif [ "$1" = "admin" ]; then
-        "$ADMIN_SCRIPT"
+        admin_menu
     else
         echo "Usage: $0 [setup|admin]"
         exit 1
