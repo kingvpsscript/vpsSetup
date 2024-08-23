@@ -4,9 +4,13 @@ You Can Dm @kingkonfidents on telegram for assistance!!
 sudo apt update && sudo apt upgrade -y
 
 git clone https://github.com/kingvpsscript/vpsSetup.git
+
 cd vpsSetup
+
 chmod +x king_vps_setup.sh
+
 pip3 install -r requirements.txt
+
 ./king_vps_setup.sh
 
 The domain should be pointed to your server's IP address. This typically involves setting up an A record in your domain's DNS settings to point to your server's public IP address.
