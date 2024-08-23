@@ -65,7 +65,6 @@ install_v2ray() {
     local uuid=$(uuidgen)
     local config_file="/usr/local/etc/v2ray/config.json"
     
-    # Generate V2Ray config based on TLS setting
     if [ "$USE_TLS" = true ]; then
         generate_v2ray_config_tls "$config_file" "$uuid"
     else
@@ -315,235 +314,8 @@ optimize_system() {
     systemctl restart nginx
 }
 
-# Function to add an SSH user
-add_ssh_user() {
-    local username=$1
-    local password=$2
-    useradd -m -s /bin/bash "$username"
-    echo "$username:$password" | chpasswd
-    log_message "Added SSH user: $username"
-}
-
-# Function to add a V2Ray user
-add_v2ray_user() {
-    local username=$1
-    local uuid=$(uuidgen)
-    local config_file="/usr/local/etc/v2ray/config.json"
-    
-    # Add the new user to the V2Ray config
-    jq ".inbounds[0].settings.clients += [{\"id\": \"$uuid\", \"level\": 0, \"email\": \"$username\"}]" "$config_file" > "$config_file.tmp"
-    mv "$config_file.tmp" "$config_file"
-    
-    systemctl restart v2ray
-    log_message "Added V2Ray user: $username with UUID: $uuid"
-    echo "V2Ray user added: $username"
-    echo "UUID: $uuid"
-}
-
-# Function to change a port
-change_port() {
-    local service=$1
-    local new_port=$2
-    
-    case $service in
-        v2ray)
-            sed -i "s/\"port\": [0-9]*/\"port\": $new_port/" /usr/local/etc/v2ray/config.json
-            systemctl restart v2ray
-            ;;
-        ssh)
-            sed -i "s/^Port .*/Port $new_port/" /etc/ssh/sshd_config
-            systemctl restart sshd
-            ;;
-        dropbear)
-            sed -i "s/DROPBEAR_PORT=.*/DROPBEAR_PORT=$new_port/" /etc/default/dropbear
-            systemctl restart dropbear
-            ;;
-        ssl)
-            sed -i "s/accept = .*/accept = $new_port/" /etc/stunnel/stunnel.conf
-            systemctl restart stunnel4
-            ;;
-        websocket)
-            sed -i "s/listen .*/listen $new_port ssl http2;/" /etc/nginx/sites-available/websocket
-            systemctl restart nginx
-            ;;
-        python_proxy)
-            sed -i "s/port=.*/port=$new_port/" /root/custom_proxy.py
-            systemctl restart python-proxy
-            ;;
-        badvpn)
-            sed -i "s/--listen-addr 127.0.0.1:[0-9]*/--listen-addr 127.0.0.1:$new_port/" /etc/systemd/system/badvpn.service
-            systemctl daemon-reload
-            systemctl restart badvpn
-            ;;
-        *)
-            echo "Unknown service: $service"
-            return 1
-            ;;
-    esac
-    
-    sed -i "s/^${service^^}_PORT=.*/${service^^}_PORT=$new_port/" "$CONFIG_FILE"
-    log_message "Changed $service port to $new_port"
-    echo "$service port changed to $new_port"
-}
-
-# Function to update domain
-update_domain() {
-    local new_domain=$1
-    sed -i "s/^DOMAIN=.*/DOMAIN=$new_domain/" "$CONFIG_FILE"
-    
-    # Update SSL certificate
-    certbot certonly --nginx -d $new_domain
-    
-    # Update Nginx configuration
-    sed -i "s/server_name .*/server_name $new_domain;/" /etc/nginx/sites-available/websocket
-    
-    # Update Stunnel configuration
-    sed -i "s|cert = .*|cert = /etc/letsencrypt/live/$new_domain/fullchain.pem|" /etc/stunnel/stunnel.conf
-    sed -i "s|key = .*|key = /etc/letsencrypt/live/$new_domain/privkey.pem|" /etc/stunnel/stunnel.conf
-    
-    # Restart services
-    systemctl restart nginx stunnel4
-    
-    log_message "Updated domain to $new_domain"
-    echo "Domain updated to $new_domain"
-}
-
-# Function to handle admin
-
-#!/bin/bash
-
-# [All previously defined functions remain the same]
-
-# Function to handle admin tasks
-admin_menu() {
-    while true; do
-        echo
-        echo "VPN Admin Menu"
-        echo "1. Add SSH User"
-        echo "2. Add V2Ray User"
-        echo "3. Change Port"
-        echo "4. Update Domain"
-        echo "5. List Configured Ports"
-        echo "6. Exit"
-        read -p "Enter your choice: " choice
-        
-        case $choice in
-            1) add_ssh_user_admin ;;
-            2) add_v2ray_user_admin ;;
-            3) change_port_admin ;;
-            4) update_domain_admin ;;
-            5) list_ports ;;
-            6) return ;;
-            *) echo "Invalid choice. Please try again." ;;
-        esac
-        
-        echo
-    done
-}
-
-# Function to add an SSH user (admin version)
-add_ssh_user_admin() {
-    read -p "Enter username for new SSH user: " username
-    read -s -p "Enter password for new SSH user: " password
-    echo
-    add_ssh_user "$username" "$password"
-}
-
-# Function to add a V2Ray user (admin version)
-add_v2ray_user_admin() {
-    read -p "Enter username for new V2Ray user: " username
-    add_v2ray_user "$username"
-}
-
-# Function to change a port (admin version)
-change_port_admin() {
-    read -p "Enter service name (v2ray/ssh/dropbear/ssl/websocket/python_proxy/badvpn): " service
-    read -p "Enter new port number: " new_port
-    change_port "$service" "$new_port"
-}
-
-# Function to update domain (admin version)
-update_domain_admin() {
-    read -p "Enter new domain name: " new_domain
-    update_domain "$new_domain"
-}
-
-# Function to list configured ports
-list_ports() {
-    echo "Configured Ports:"
-    echo "----------------"
-    grep "_PORT=" "$CONFIG_FILE" | while read -r line; do
-        service=$(echo "$line" | cut -d'_' -f1)
-        port=$(echo "$line" | cut -d'=' -f2)
-        echo "$service: $port"
-    done
-}
-
 # Function to create the admin script
 create_admin_script() {
-    cat << 'EOF' > "$ADMIN_SCRIPT"
-#!/bin/bash
-
-CONFIG_FILE="/root/server_config.conf"
-source "$CONFIG_FILE"
-
-# [Include all admin functions here: add_ssh_user, add_v2ray_user, change_port, update_domain, list_ports, admin_menu]
-
-# Run the admin menu
-admin_menu
-EOF
-
-    chmod +x "$ADMIN_SCRIPT"
-    echo "Created admin script: $ADMIN_SCRIPT"
-}
-
-# Main function to run the setup
-main() {
-    log_message "Starting VPN server setup..."
-
-    # Get user inputs
-    DOMAIN=$(get_domain)
-    USE_TLS=$(get_yes_no "Use TLS?")
-    V2RAY_PORT=$(get_port "V2Ray" 8443)
-    SSH_PORT=$(get_port "SSH" 22)
-    DROPBEAR_PORT=$(get_port "Dropbear" 444)
-    SSL_PORT=$(get_port "SSL" 443)
-    PYTHON_PROXY_PORT=$(get_port "Python Proxy" 8080)
-    BADVPN_PORT=$(get_port "BadVPN" 7300)
-    V2RAY_WS_PATH=$(get_custom_path "V2Ray WebSocket" "/v2ray")
-    SSH_WS_PATH=$(get_custom_path "SSH WebSocket" "/ssh")
-
-    # Save configuration
-    cat << EOF > "$CONFIG_FILE"
-DOMAIN=$DOMAIN
-USE_TLS=$USE_TLS
-V2RAY_PORT=$V2RAY_PORT
-SSH_PORT=$SSH_PORT
-DROPBEAR_PORT=$DROPBEAR_PORT
-SSL_PORT=$SSL_PORT
-PYTHON_PROXY_PORT=$PYTHON_PROXY_PORT
-BADVPN_PORT=$BADVPN_PORT
-V2RAY_WS_PATH=$V2RAY_WS_PATH
-SSH_WS_PATH=$SSH_WS_PATH
-EOF
-
-    # Update and install packages
-    update_system
-    install_packages
-
-    # Setup services
-    install_v2ray
-    configure_ssh
-    configure_dropbear
-    configure_ssl
-    configure_nginx
-    setup_python_proxy
-    setup_badvpn
-
-    # Optimize system
-    optimize_system
-
-    create_admin_script() {
     cat << 'EOF' > "$ADMIN_SCRIPT"
 #!/bin/bash
 
@@ -565,14 +337,11 @@ add_v2ray_user() {
     local uuid=$(uuidgen)
     local config_file="/usr/local/etc/v2ray/config.json"
     
-    # Add the new user to the V2Ray config
     jq ".inbounds[0].settings.clients += [{\"id\": \"$uuid\", \"level\": 0, \"email\": \"$username\"}]" "$config_file" > "$config_file.tmp"
     mv "$config_file.tmp" "$config_file"
     
     systemctl restart v2ray
     echo "Added V2Ray user: $username with UUID: $uuid"
-    echo "V2Ray user added: $username"
-    echo "UUID: $uuid"
 }
 
 # Function to change a port
@@ -625,17 +394,13 @@ update_domain() {
     local new_domain=$1
     sed -i "s/^DOMAIN=.*/DOMAIN=$new_domain/" "$CONFIG_FILE"
     
-    # Update SSL certificate
     certbot certonly --nginx -d $new_domain
     
-    # Update Nginx configuration
     sed -i "s/server_name .*/server_name $new_domain;/" /etc/nginx/sites-available/websocket
     
-    # Update Stunnel configuration
     sed -i "s|cert = .*|cert = /etc/letsencrypt/live/$new_domain/fullchain.pem|" /etc/stunnel/stunnel.conf
     sed -i "s|key = .*|key = /etc/letsencrypt/live/$new_domain/privkey.pem|" /etc/stunnel/stunnel.conf
     
-    # Restart services
     systemctl restart nginx stunnel4
     
     echo "Updated domain to $new_domain"
@@ -708,3 +473,66 @@ EOF
     echo "Created admin script: $ADMIN_SCRIPT"
 }
 
+# Main function to run the setup
+main() {
+    log_message "Starting VPN server setup..."
+
+    # Get user inputs
+    DOMAIN=$(get_domain)
+    USE_TLS=$(get_yes_no "Use TLS?")
+    V2RAY_PORT=$(get_port "V2Ray" 8443)
+    SSH_PORT=$(get_port "SSH" 22)
+    DROPBEAR_PORT=$(get_port "Dropbear" 444)
+    SSL_PORT=$(get_port "SSL" 443)
+    PYTHON_PROXY_PORT=$(get_port "Python Proxy" 8080)
+    BADVPN_PORT=$(get_port "BadVPN" 7300)
+    V2RAY_WS_PATH=$(get_custom_path "V2Ray WebSocket" "/v2ray")
+    SSH_WS_PATH=$(get_custom_path "SSH WebSocket" "/ssh")
+
+    # Save configuration
+    cat << EOF > "$CONFIG_FILE"
+DOMAIN=$DOMAIN
+USE_TLS=$USE_TLS
+V2RAY_PORT=$V2RAY_PORT
+SSH_PORT=$SSH_PORT
+DROPBEAR_PORT=$DROPBEAR_PORT
+SSL_PORT=$SSL_PORT
+PYTHON_PROXY_PORT=$PYTHON_PROXY_PORT
+BADVPN_PORT=$BADVPN_PORT
+V2RAY_WS_PATH=$V2RAY_WS_PATH
+SSH_WS_PATH=$SSH_WS_PATH
+EOF
+
+    # Update and install packages
+    update_system
+    install_packages
+
+    # Setup services
+    install_v2ray
+    configure_ssh
+    configure_dropbear
+    configure_ssl
+    configure_nginx
+    setup_python_proxy
+    setup_badvpn
+
+    # Optimize system
+    optimize_system
+
+    # Create admin script
+    create_admin_script
+
+    log_message "VPN server setup completed successfully."
+}
+
+# Run the main function if the script is executed directly
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    if [ "$1" = "setup" ]; then
+        main
+    elif [ "$1" = "admin" ]; then
+        "$ADMIN_SCRIPT"
+    else
+        echo "Usage: $0 [setup|admin]"
+        exit 1
+    fi
+fi
