@@ -2,8 +2,8 @@
 <img src="https://readme-typing-svg.herokuapp.com?color=%2336BCF7&center=true&vCenter=true&lines=S++C++R++I++P+T++~++M++O++D++~++B++Y" />
 <img src="https://readme-typing-svg.herokuapp.com?color=%2336BCF7&center=true&vCenter=true&lines=T++A++R++A++P+~+K++U++H++I++N++G" />
 </p>
-<p align='center'><a href="https://api.daily.dev/get?r=SLSTunnel"><img src="![image](https://github.com/user-attachments/assets/8429076b-3ace-4990-a573-e93079159dd2)
-" width="150" alt="Hayuk"/></a></p>
+<p align='center'><a href="https://api.daily.dev/get?r=SLSTunnel"><img src="[![image](https://github.com/user-attachments/assets/8429076b-3ace-4990-a573-e93079159dd2](https://archive.pinupmagazine.org/thumbs/articles/article-guy-fawkes-mask-v-for-vendetta/v-for-vendetta-pinup-magazine-01-1000x567.png))
+" width="150" alt="King🎭"/></a></p>
 
 <h2 align="center">
 
