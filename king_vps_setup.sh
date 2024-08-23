@@ -3,6 +3,7 @@
 # Global variables
 CONFIG_FILE="/root/server_config.conf"
 LOG_FILE="/var/log/server_setup.log"
+ADMIN_SCRIPT="/usr/local/bin/vpn_admin"
 
 # Function to log messages
 log_message() {
@@ -38,6 +39,12 @@ get_custom_path() {
     echo ${custom_path:-$default}
 }
 
+# Function to get domain
+get_domain() {
+    read -p "Enter your domain name: " domain
+    echo $domain
+}
+
 # Function to update and upgrade system
 update_system() {
     log_message "Updating and upgrading system..."
@@ -47,7 +54,7 @@ update_system() {
 # Function to install necessary packages
 install_packages() {
     log_message "Installing necessary packages..."
-    sudo apt install -y curl wget unzip net-tools python3 python3-pip dropbear stunnel4 nginx build-essential
+    sudo apt install -y curl wget unzip net-tools python3 python3-pip dropbear stunnel4 nginx build-essential certbot python3-certbot-nginx
 }
 
 # Function to install and configure V2Ray
@@ -63,10 +70,6 @@ install_v2ray() {
         generate_v2ray_config_tls "$config_file" "$uuid"
     else
         generate_v2ray_config_no_tls "$config_file" "$uuid"
-    fi
-
-    if [ "$USE_TLS" = true ]; then
-        generate_v2ray_cert
     fi
 
     systemctl start v2ray
@@ -96,34 +99,6 @@ generate_v2ray_config_tls() {
       },
       "streamSettings": {
         "network": "ws",
-        "wsSettings": {
-          "path": "$V2RAY_WS_PATH"
-        }
-      }
-    },
-    {
-      "port": $V2RAY_TLS_PORT,
-      "protocol": "vless",
-      "settings": {
-        "clients": [
-          {
-            "id": "$uuid",
-            "level": 0
-          }
-        ],
-        "decryption": "none"
-      },
-      "streamSettings": {
-        "network": "ws",
-        "security": "tls",
-        "tlsSettings": {
-          "certificates": [
-            {
-              "certificateFile": "/etc/v2ray/v2ray.crt",
-              "keyFile": "/etc/v2ray/v2ray.key"
-            }
-          ]
-        },
         "wsSettings": {
           "path": "$V2RAY_WS_PATH"
         }
@@ -175,22 +150,10 @@ generate_v2ray_config_no_tls() {
 EOF
 }
 
-# Function to generate V2Ray self-signed certificate
-generate_v2ray_cert() {
-    log_message "Generating self-signed certificate for V2Ray TLS..."
-    openssl req -new -newkey rsa:4096 -days 365 -nodes -x509 \
-        -subj "/C=US/ST=State/L=City/O=Organization/CN=localhost" \
-        -keyout /etc/v2ray/v2ray.key -out /etc/v2ray/v2ray.crt
-}
-
 # Function to configure SSH
 configure_ssh() {
     log_message "Configuring SSH..."
     sed -i "s/#Port 22/Port $SSH_PORT/" /etc/ssh/sshd_config
-    if [ ! -z "$SSH_BANNER" ]; then
-        echo "$SSH_BANNER" > /etc/ssh/banner
-        echo "Banner /etc/ssh/banner" >> /etc/ssh/sshd_config
-    fi
     systemctl restart sshd
 }
 
@@ -199,9 +162,6 @@ configure_dropbear() {
     log_message "Configuring Dropbear..."
     sed -i "s/NO_START=1/NO_START=0/" /etc/default/dropbear
     sed -i "s/DROPBEAR_PORT=22/DROPBEAR_PORT=$DROPBEAR_PORT/" /etc/default/dropbear
-    if [ ! -z "$SSH_BANNER" ]; then
-        echo "DROPBEAR_BANNER=\"/etc/ssh/banner\"" >> /etc/default/dropbear
-    fi
     systemctl restart dropbear
 }
 
@@ -210,7 +170,8 @@ configure_ssl() {
     log_message "Configuring SSL..."
     cat << EOF > /etc/stunnel/stunnel.conf
 pid = /var/run/stunnel.pid
-cert = /etc/stunnel/stunnel.pem
+cert = /etc/letsencrypt/live/$DOMAIN/fullchain.pem
+key = /etc/letsencrypt/live/$DOMAIN/privkey.pem
 client = no
 socket = l:TCP_NODELAY=1
 socket = r:TCP_NODELAY=1
@@ -220,10 +181,6 @@ accept = $SSL_PORT
 connect = 127.0.0.1:$DROPBEAR_PORT
 EOF
 
-    openssl req -new -newkey rsa:2048 -days 3650 -nodes -x509 \
-        -subj "/C=US/ST=State/L=City/O=Organization/CN=localhost" \
-        -keyout /etc/stunnel/stunnel.pem -out /etc/stunnel/stunnel.pem
-
     systemctl restart stunnel4
 }
 
@@ -232,8 +189,21 @@ configure_nginx() {
     log_message "Configuring Nginx for WebSocket..."
     cat << EOF > /etc/nginx/sites-available/websocket
 server {
-    listen $WEBSOCKET_PORT;
-    server_name localhost;
+    listen 80;
+    server_name $DOMAIN;
+    return 301 https://\$server_name\$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name $DOMAIN;
+
+    ssl_certificate /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$DOMAIN/privkey.pem;
+
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers on;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384;
 
     location $V2RAY_WS_PATH {
         proxy_redirect off;
@@ -259,7 +229,7 @@ server {
 }
 EOF
 
-    ln -s /etc/nginx/sites-available/websocket /etc/nginx/sites-enabled/
+    ln -sf /etc/nginx/sites-available/websocket /etc/nginx/sites-enabled/
     nginx -t && systemctl restart nginx
 }
 
@@ -285,7 +255,6 @@ class CustomHandler(ProxyHandler):
         conn.sendall(b"HTTP/1.1 101 Switching Protocols\r\n")
         conn.sendall(b"Upgrade: websocket\r\n")
         conn.sendall(b"Connection: Upgrade\r\n")
-        conn.sendall(f"X-Proxy-Message: {PYTHON_PROXY_MESSAGE}\r\n".encode())
         conn.sendall(b"\r\n")
         super().handle_client_connection(conn, addr)
 
@@ -394,7 +363,7 @@ change_port() {
             systemctl restart stunnel4
             ;;
         websocket)
-            sed -i "s/listen .*/listen $new_port;/" /etc/nginx/sites-available/websocket
+            sed -i "s/listen .*/listen $new_port ssl http2;/" /etc/nginx/sites-available/websocket
             systemctl restart nginx
             ;;
         python_proxy)
@@ -417,6 +386,28 @@ change_port() {
     echo "$service port changed to $new_port"
 }
 
+# Function to update domain
+update_domain() {
+    local new_domain=$1
+    sed -i "s/^DOMAIN=.*/DOMAIN=$new_domain/" "$CONFIG_FILE"
+    
+    # Update SSL certificate
+    certbot certonly --nginx -d $new_domain
+    
+    # Update Nginx configuration
+    sed -i "s/server_name .*/server_name $new_domain;/" /etc/nginx/sites-available/websocket
+    
+    # Update Stunnel configuration
+    sed -i "s|cert = .*|cert = /etc/letsencrypt/live/$new_domain/fullchain.pem|" /etc/stunnel/stunnel.conf
+    sed -i "s|key = .*|key = /etc/letsencrypt/live/$new_domain/privkey.pem|" /etc/stunnel/stunnel.conf
+    
+    # Restart services
+    systemctl restart nginx stunnel4
+    
+    log_message "Updated domain to $new_domain"
+    echo "Domain updated to $new_domain"
+}
+
 # Function to handle admin tasks
 admin_menu() {
     while true; do
@@ -425,16 +416,18 @@ admin_menu() {
         echo "1. Add SSH User"
         echo "2. Add V2Ray User"
         echo "3. Change Port"
-        echo "4. List Configured Ports"
-        echo "5. Exit"
+        echo "4. Update Domain"
+        echo "5. List Configured Ports"
+        echo "6. Exit"
         read -p "Enter your choice: " choice
         
         case $choice in
             1) add_ssh_user_admin ;;
             2) add_v2ray_user_admin ;;
             3) change_port_admin ;;
-            4) list_ports ;;
-            5) return ;;
+            4) update_domain_admin ;;
+            5) list_ports ;;
+            6) return ;;
             *) echo "Invalid choice. Please try again." ;;
         esac
         
@@ -463,6 +456,12 @@ change_port_admin() {
     change_port "$service" "$new_port"
 }
 
+# Function to update domain (admin version)
+update_domain_admin() {
+    read -p "Enter new domain name: " new_domain
+    update_domain "$new_domain"
+}
+
 # Function to list configured ports
 list_ports() {
     echo "Configured Ports:"
@@ -472,14 +471,31 @@ list_ports() {
         port=$(echo "$line" | cut -d'=' -f2)
         echo "$service: $port"
     done
-    if [ "$USE_TLS" = true ]; then
-        echo "V2Ray TLS: $V2RAY_TLS_PORT"
-    fi
+}
+
+# Function to create the admin script
+create_admin_script() {
+    cat << 'EOF' > "$ADMIN_SCRIPT"
+#!/bin/bash
+
+CONFIG_FILE="/root/server_config.conf"
+source "$CONFIG_FILE"
+
+# Include all the functions from the main script here
+# (copy all functions from add_ssh_user to list_ports)
+
+# Run the admin menu
+admin_menu
+EOF
+
+    chmod +x "$ADMIN_SCRIPT"
+    log_message "Created admin script: $ADMIN_SCRIPT"
 }
 
 # Main script execution
 main() {
     # Initialize configuration
+    DOMAIN=$(get_domain)
     V2RAY_PORT=$(get_port "V2Ray" 10086)
     SSH_PORT=$(get_port "SSH" 22)
     DROPBEAR_PORT=$(get_port "Dropbear" 444)
@@ -492,12 +508,10 @@ main() {
     SSH_WS_PATH=$(get_custom_path "SSH WebSocket" "/ssh")
 
     USE_TLS=$(get_yes_no "Use TLS for V2Ray?")
-    if [ "$USE_TLS" = true ]; then
-        V2RAY_TLS_PORT=$(get_port "V2Ray TLS" 443)
-    fi
 
     # Save configuration
     cat << EOF > "$CONFIG_FILE"
+DOMAIN=$DOMAIN
 V2RAY_PORT=$V2RAY_PORT
 SSH_PORT=$SSH_PORT
 DROPBEAR_PORT=$DROPBEAR_PORT
@@ -510,10 +524,6 @@ SSH_WS_PATH=$SSH_WS_PATH
 USE_TLS=$USE_TLS
 EOF
 
-    if [ "$USE_TLS" = true ]; then
-        echo "V2RAY_TLS_PORT=$V2RAY_TLS_PORT" >> "$CONFIG_FILE"
-    fi
-
     # Execute setup functions
     update_system
     install_packages
@@ -525,6 +535,9 @@ EOF
     setup_python_proxy
     setup_badvpn
     optimize_system
+
+    # Create admin script
+    create_admin_script
 
     # Run admin menu
     admin_menu
