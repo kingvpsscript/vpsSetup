@@ -1,162 +1,304 @@
 #!/bin/bash
-clear
-cd $HOME
-SCPdir="/etc/newadm"
-SCPinstal="$HOME/install"
-SCPidioma="${SCPdir}/idioma"
-SCPusr="${SCPdir}/user"
-SCPfrm="/etc/user-txt"
-SCPinst="/etc/inst-txt"
-[[ -e /etc/bash.bashrc-bakup ]] && mv -f /etc/bash.bashrc-bakup /etc/bash.bashrc
-rm -rf $SCPdir 2>/dev/null
-rm -rf $SCPinst 2>/dev/null
-rm -rf $SCPfrm 2>/dev/null
 
-fun_bar () {
-command[0]="$1"
-command[1]="$2"
- (
-[[ -e $HOME/fin ]] && rm $HOME/fin
-${command[0]} -y > /dev/null 2>&1
-${command[1]} -y > /dev/null 2>&1
-touch $HOME/fin
- ) > /dev/null 2>&1 &
- tput civis
-echo -ne "  \033[1;33mWAIT \033[1;37m- \033[1;33m["
-while true; do
-   for((i=0; i<18; i++)); do
-   echo -ne "\033[1;31m#"
-   sleep 0.1s
-   done
-   [[ -e $HOME/fin ]] && rm $HOME/fin && break
-   echo -e "\033[1;33m]"
-   sleep 1s
-   tput cuu1
-   tput dl1
-   echo -ne "  \033[1;33mWAIT \033[1;37m- \033[1;33m["
-done
-echo -e "\033[1;33m]\033[1;37m -\033[1;32m OK !\033[1;37m"
-tput cnorm
+# Function to print messages in color
+print_msg() {
+    local color=$1
+    local msg=$2
+    case $color in
+        "red") echo -e "\033[31m$msg\033[0m" ;;
+        "green") echo -e "\033[32m$msg\033[0m" ;;
+        "yellow") echo -e "\033[33m$msg\033[0m" ;;
+        *) echo "$msg" ;;
+    esac
 }
 
-install_packages() {
-    echo -e "\033[1;33mInstalling necessary packages...\033[0m"
-    fun_bar 'apt-get update' 'apt-get upgrade -y'
-    fun_bar 'apt-get install curl -y' 'apt-get install apache2 -y'
-    fun_bar 'apt-get install php -y' 'apt-get install libapache2-mod-php -y'
-    fun_bar 'apt-get install screen -y' 'apt-get install python -y'
-    fun_bar 'apt-get install lsof -y' 'apt-get install python3-pip -y'
-    fun_bar 'apt-get install unzip -y' 'apt-get install zip -y'
-    fun_bar 'apt-get install ufw -y' 'apt-get install nmap -y'
-    fun_bar 'apt-get install figlet -y' 'apt-get install bc -y'
-    fun_bar 'apt-get install lynx -y' 'apt-get install curl -y'
+# Function to install a package if not already installed
+install_package() {
+    local package=$1
+    if ! dpkg -l | grep -q $package; then
+        print_msg "yellow" "Installing $package..."
+        apt install -y $package
+        if [ $? -ne 0 ]; then
+            print_msg "red" "Error installing $package."
+            exit 1
+        fi
+    else
+        print_msg "green" "$package is already installed."
+    fi
 }
 
-configure_apache() {
-    echo -e "\033[1;33mConfiguring Apache...\033[0m"
-    sed -i "s;Listen 80;Listen 81;g" /etc/apache2/ports.conf
-    service apache2 restart
+# Update and install necessary packages
+apt update && apt upgrade -y
+install_package "dropbear"
+install_package "v2ray"
+install_package "curl"
+install_package "nano"
+install_package "python3"
+install_package "python3-pip"
+
+# Functions to manage users
+add_user() {
+    read -p "Enter username: " username
+    if id "$username" &>/dev/null; then
+        print_msg "red" "User $username already exists."
+        return
+    fi
+    read -s -p "Enter password: " password
+    echo
+    useradd -m -s /bin/bash $username
+    echo "$username:$password" | chpasswd
+    if [ $? -ne 0 ]; then
+        print_msg "red" "Failed to add user $username."
+    else
+        print_msg "green" "User $username added successfully."
+    fi
 }
 
-install_script() {
-    echo -e "\033[1;33mInstalling script...\033[0m"
-    fun_bar "$SCPinstal/list 'rm -rf /var/www/html' && 'mkdir /var/www/html'"
-    fun_bar "$SCPinstal/list 'cp -af /etc/newadm/html/. /var/www/html/'"
-    fun_bar "$SCPinstal/list 'chmod -R 755 /var/www/html'"
-    fun_bar "$SCPinstal/list 'service apache2 restart'"
+delete_user() {
+    read -p "Enter username: " username
+    if ! id "$username" &>/dev/null; then
+        print_msg "red" "User $username does not exist."
+        return
+    fi
+    userdel -r $username
+    if [ $? -ne 0 ]; then
+        print_msg "red" "Failed to delete user $username."
+    else
+        print_msg "green" "User $username deleted successfully."
+    fi
 }
 
-install_newadm() {
-    echo -e "\033[1;33mInstalling NEW-ULTIMATE...\033[0m"
-    fun_bar "$SCPinstal/list 'mkdir /etc/newadm'"
-    fun_bar "$SCPinstal/list 'cd /etc/newadm && wget https://raw.githubusercontent.com/lacasitamx/scripts/master/instalador/instalscript'"
-    fun_bar "$SCPinstal/list 'cd /etc/newadm && chmod +x instalscript && ./instalscript'"
+list_users() {
+    print_msg "yellow" "Listing all users:"
+    cut -d: -f1 /etc/passwd
 }
 
-error_fun () {
-echo -e "\033[1;31mYour linux distribution is not compatible!"
-echo -e "\033[1;31mUse Ubuntu 16 - 18 or higher\033[0m"
+# Function to configure ports
+configure_ports() {
+    read -p "Enter new SSH port: " ssh_port
+    read -p "Enter new Dropbear port: " dropbear_port
+    read -p "Enter new V2Ray port: " v2ray_port
+
+    # Update SSH port
+    if [ ! -z "$ssh_port" ]; then
+        sed -i "s/#Port 22/Port $ssh_port/" /etc/ssh/sshd_config
+        systemctl restart sshd
+        print_msg "green" "SSH port updated to $ssh_port."
+    fi
+    
+    # Update Dropbear port
+    if [ ! -z "$dropbear_port" ]; then
+        sed -i "s/DROPBEAR_PORT=22/DROPBEAR_PORT=$dropbear_port/" /etc/default/dropbear
+        systemctl restart dropbear
+        print_msg "green" "Dropbear port updated to $dropbear_port."
+    fi
+
+    # Update V2Ray configuration
+    if [ ! -z "$v2ray_port" ]; then
+        sed -i "s/\"port\": .*/\"port\": $v2ray_port,/" /etc/v2ray/config.json
+        systemctl restart v2ray
+        print_msg "green" "V2Ray port updated to $v2ray_port."
+    fi
 }
 
-os_system () {
-system=$(echo $(cat -n /etc/issue |grep 1 |cut -d' ' -f6,7,8 |sed 's/1//' |sed 's/      //'))
-echo $system|awk '{print $1, $2}'
+# Function to configure V2Ray VLESS
+configure_v2ray() {
+    cat <<EOF > /etc/v2ray/config.json
+{
+  "inbounds": [
+    {
+      "port": 443,
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "$(uuidgen)",
+            "level": 1,
+            "email": "user@v2ray.com"
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "ws",
+        "wsSettings": {
+          "path": "/vless"
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "freedom",
+      "settings": {}
+    }
+  ]
+}
+EOF
+
+    systemctl restart v2ray
+    if [ $? -ne 0 ]; then
+        print_msg "red" "Failed to configure V2Ray VLESS."
+    else
+        print_msg "green" "V2Ray VLESS configured successfully."
+    fi
 }
 
-remove_script () {
-clear
-echo -e "\033[1;36mUNINSTALLING SCRIPT\033[0m"
-echo ""
-echo -e "\033[1;36mRemoving installed packages\033[0m"
-echo ""
-fun_bar "apt-get remove screen -y"
-fun_bar "apt-get remove python -y"
-fun_bar "apt-get remove lsof -y"
-fun_bar "apt-get remove python3-pip -y"
-fun_bar "apt-get remove python -y"
-fun_bar "apt-get remove unzip -y"
-fun_bar "apt-get remove zip -y"
-fun_bar "apt-get remove apache2 -y"
-fun_bar "apt-get remove ufw -y"
-fun_bar "apt-get remove nmap -y"
-fun_bar "apt-get remove figlet -y"
-fun_bar "apt-get remove bc -y"
-fun_bar "apt-get remove lynx -y"
-fun_bar "apt-get remove curl -y"
-sed -i "s;Listen 81;Listen 80;g" /etc/apache2/ports.conf
-service apache2 restart > /dev/null 2>&1
-echo ""
-echo -e "\033[1;36mRemoving script files\033[0m"
-echo ""
-fun_bar "rm -rf /etc/newadm"
-fun_bar "rm -rf /var/www/html"
-fun_bar "rm -rf /usr/bin/menu"
-fun_bar "rm -rf /bin/menu"
-fun_bar "rm -rf /usr/bin/adm"
-fun_bar "rm -rf /bin/adm"
-echo ""
-echo -e "\033[1;36mScript removed successfully!\033[0m"
+# Function to configure Python proxy
+configure_python_proxy() {
+    pip3 install -U proxy.py
+    cat <<EOF > /etc/systemd/system/python-proxy.service
+[Unit]
+Description=Python Proxy
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/proxy
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl enable python-proxy
+    systemctl start python-proxy
+    if [ $? -ne 0 ]; then
+        print_msg "red" "Failed to configure Python proxy."
+    else
+        print_msg "green" "Python proxy configured successfully."
+    fi
 }
 
-while true $x != "ok"
+# Function to configure SSH banner
+configure_ssh_banner() {
+    cat <<'EOF' > /etc/issue.net
+Welcome to your server!
+Unauthorized access is prohibited.
+EOF
+
+    sed -i 's/#Banner none/Banner \/etc\/issue.net/' /etc/ssh/sshd_config
+    systemctl restart sshd
+    if [ $? -ne 0 ]; then
+        print_msg "red" "Failed to configure SSH banner."
+    else
+        print_msg "green" "SSH banner configured successfully."
+    fi
+}
+
+# Function to configure Python proxy banner
+configure_python_proxy_banner() {
+    cat <<'EOF' > /etc/python-proxy-banner.txt
+Welcome to the Python Proxy service!
+Unauthorized access is prohibited.
+EOF
+    print_msg "green" "Python proxy banner configured. Apply it in your proxy configuration as needed."
+}
+
+# Admin menu
+admin_menu() {
+    PS3='Please enter your choice: '
+    options=("Add User" "Delete User" "List Users" "Configure Ports" "Configure V2Ray" "Configure Python Proxy" "Configure SSH Banner" "Configure Python Proxy Banner" "Quit")
+    select opt in "${options[@]}"
+    do
+        case $opt in
+            "Add User")
+                add_user
+                ;;
+            "Delete User")
+                delete_user
+                ;;
+            "List Users")
+                list_users
+                ;;
+            "Configure Ports")
+                configure_ports
+                ;;
+            "Configure V2Ray")
+                configure_v2ray
+                ;;
+            "Configure Python Proxy")
+                configure_python_proxy
+                ;;
+            "Configure SSH Banner")
+                configure_ssh_banner
+                ;;
+            "Configure Python Proxy Banner")
+                configure_python_proxy_banner
+                ;;
+            "Quit")
+                break
+                ;;
+            *) print_msg "red" "Invalid option $REPLY";;
+        esac
+    done
+}
+
+# Initial setup
+print_msg "yellow" "Configuring Dropbear..."
+sed -i 's/NO_START=1/NO_START=0/' /etc/default/dropbear
+sed -i 's/DROPBEAR_PORT=22/DROPBEAR_PORT=4422/' /etc/default/dropbear
+systemctl enable dropbear
+systemctl start dropbear
+
+print_msg "yellow" "Setting up V2Ray..."
+curl -L -o /etc/v2ray/v2ray.zip https://github.com/v2ray/v2ray-core/releases/download/v4.27.0/v2ray-linux-64.zip
+unzip /etc/v2ray/v2ray.zip -d /etc/v2ray/
+chmod +x /etc/v2ray/v2ray /etc/v2ray/v2ctl
+configure_v2ray
+
+print_msg "yellow" "Configuring Python proxy..."
+configure_python_proxy
+
+print_msg "yellow" "Configuring SSH banner..."
+configure_ssh_banner
+
+print_msg "yellow" "Configuring Python proxy banner..."
+configure_python_proxy_banner
+
+print_msg "yellow" "Starting admin menu..."
+admin_menu
+
+# Create a script for the admin menu that can be run anytime
+cat <<'EOF' > /usr/local/bin/admin_menu.sh
+#!/bin/bash
+
+PS3='Please enter your choice: '
+options=("Add User" "Delete User" "List Users" "Configure Ports" "Configure V2Ray" "Configure Python Proxy" "Configure SSH Banner" "Configure Python Proxy Banner" "Quit")
+select opt in "${options[@]}"
 do
-if [[ "$(whoami)" != "root" ]]; then
-clear
-echo -e "\033[1;31mEXECUTE AS ROOT USER\033[0m"
-exit
-elif [[ "$(os_system)" = "Ubuntu" ]]; then
-clear
-echo -e "\033[1;37mYOU ARE USING UBUNTU 16 - 18!\033[0m"
-echo -e "\033[1;33mTO CONTINUE TYPE \033[1;32msi \033[1;33mOR \033[1;32mno\033[0m"
-read -p " : " x
-[[ $x = @(n|N|no|NO) ]] && error_fun && exit
-[[ $x = @(y|Y|s|S|si|SI) ]] && install_packages && configure_apache && install_script && install_newadm
-elif [[ "$(os_system)" = "Debian" ]]; then
-clear
-echo -e "\033[1;37mYOU ARE USING DEBIAN 9 - 10!\033[0m"
-echo -e "\033[1;33mTO CONTINUE TYPE \033[1;32msi \033[1;33mOR \033[1;32mno\033[0m"
-read -p " : " x
-[[ $x = @(n|N|no|NO) ]] && error_fun && exit
-[[ $x = @(y|Y|s|S|si|SI) ]] && install_packages && configure_apache && install_script && install_newadm
-elif [[ "$(os_system)" = "Ubuntu 20" ]]; then
-clear
-echo -e "\033[1;37mYOU ARE USING UBUNTU 20!\033[0m"
-echo -e "\033[1;33mTO CONTINUE TYPE \033[1;32msi \033[1;33mOR \033[1;32mno\033[0m"
-read -p " : " x
-[[ $x = @(n|N|no|NO) ]] && error_fun && exit
-[[ $x = @(y|Y|s|S|si|SI) ]] && install_packages && configure_apache && install_script && install_newadm
-else
-clear
-echo -e "\033[1;31mUNSUPPORTED SYSTEM\033[0m"
-echo -e "\033[1;31mUse Ubuntu 16 - 18 or higher\033[0m"
-exit
-fi
+    case $opt in
+        "Add User")
+            sudo add_user
+            ;;
+        "Delete User")
+            sudo delete_user
+            ;;
+        "List Users")
+            sudo list_users
+            ;;
+        "Configure Ports")
+            sudo configure_ports
+            ;;
+        "Configure V2Ray")
+            sudo configure_v2ray
+            ;;
+        "Configure Python Proxy")
+            sudo configure_python_proxy
+            ;;
+        "Configure SSH Banner")
+            sudo configure_ssh_banner
+            ;;
+        "Configure Python Proxy Banner")
+            sudo configure_python_proxy_banner
+            ;;
+        "Quit")
+            break
+            ;;
+        *) echo "Invalid option $REPLY";;
+    esac
 done
+EOF
 
-echo ""
-echo -e "\033[1;33mInstallation completed!"
-echo ""
-echo -e "\033[1;31m\033[1;33mMain Command: \033[1;32mmenu\033[0m"
-echo -e "\033[1;33mMore information \033[1;31m(\033[1;36mTELEGRAM\033[1;31m): \033[1;37m@LACASITAMX\033[0m"
-rm -rf $SCPdir/README.md && rm -rf $SCPdir/install.sh
-rm -rf $SCPdir/instalscript
+chmod +x /usr/local/bin/admin_menu.sh
+
+print_msg "green" "Admin menu can be accessed anytime by running: sudo /usr/local/bin/admin_menu.sh"
