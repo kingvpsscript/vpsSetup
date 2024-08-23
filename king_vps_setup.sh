@@ -520,17 +520,77 @@ EOF
     optimize_system
 
     # Create admin script
-    create_admin_script
+    create_admin_script() {
+    cat << 'EOF' > "$ADMIN_SCRIPT"
+#!/bin/bash
 
-    log_message "VPN server setup completed successfully."
+CONFIG_FILE="/root/server_config.conf"
+source "$CONFIG_FILE"
+
+# Function to add an SSH user
+add_ssh_user() {
+    local username=$1
+    local password=$2
+    useradd -m -s /bin/bash "$username"
+    echo "$username:$password" | chpasswd
+    echo "Added SSH user: $username"
 }
 
-# Run the main function if the script is executed directly
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    if [ "$1" = "setup" ]; then
-        main
-    elif [ "$1" = "admin" ]; then
-        "$ADMIN_SCRIPT"
+# Function to add a V2Ray user
+add_v2ray_user() {
+    local username=$1
+    local uuid=$(uuidgen)
+    local config_file="/usr/local/etc/v2ray/config.json"
+    
+    jq ".inbounds[0].settings.clients += [{\"id\": \"$uuid\", \"level\": 0, \"email\": \"$username\"}]" "$config_file" > "$config_file.tmp"
+    mv "$config_file.tmp" "$config_file"
+    
+    systemctl restart v2ray
+    echo "Added V2Ray user: $username with UUID: $uuid"
+}
+
+# Function to change a port
+change_port() {
+    local service=$1
+    local new_port=$2
+    
+    case $service in
+        v2ray)
+            sed -i "s/\"port\": [0-9]*/\"port\": $new_port/" /usr/local/etc/v2ray/config.json
+            systemctl restart v2ray
+            ;;
+        ssh)
+            sed -i "s/^Port .*/Port $new_port/" /etc/ssh/sshd_config
+            systemctl restart sshd
+            ;;
+        dropbear)
+            sed -i "s/DROPBEAR_PORT=.*/DROPBEAR_PORT=$new_port/" /etc/default/dropbear
+            systemctl restart dropbear
+            ;;
+        ssl)
+            sed -i "s/accept = .*/accept = $new_port/" /etc/stunnel/stunnel.conf
+            systemctl restart stunnel4
+            ;;
+        websocket)
+            sed -i "s/listen .*/listen $new_port ssl http2;/" /etc/nginx/sites-available/websocket
+            systemctl restart nginx
+            ;;
+        python_proxy)
+            sed -i "s/port=.*/port=$new_port/" /root/custom_proxy.py
+            systemctl restart python-proxy
+            ;;
+        badvpn)
+            sed -i "s/--listen-addr 127.0.0.1:[0-9]*/--listen-addr 127.0.0.1:$new_port/" /etc/systemd/system/badvpn.service
+            systemctl daemon-reload
+            systemctl restart badvpn
+            ;;
+        *)
+            echo "Unknown service: $service"
+            return 1
+            ;;
+    esac
+    
+    sed -i "s/^${service^^}_PORT=.*/${service^^}_PORT=$new_port/" "$CONFIG
     else
         echo "Usage: $0 [setup|admin]"
         exit 1
