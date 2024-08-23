@@ -1,23 +1,22 @@
 #!/bin/bash
 clear
 cd $HOME
+
+# Define directories
 SCPdir="/etc/newadm"
 SCPinstal="$HOME/install"
-SCPidioma="${SCPdir}/language"
-SCPusr="${SCPdir}/user-manager"
-SCPfrm="/etc/feature-manager"
-SCPinst="/etc/installer"
+SCPidioma="${SCPdir}/idioma"
+SCPusr="${SCPdir}/ger-user"
+SCPfrm="/etc/ger-frm"
+SCPinst="/etc/ger-inst"
 
-# Install required packages
-[[ $(dpkg --get-selections|grep -w "gawk"|head -1) ]] || apt-get install gawk -y &>/dev/null
-[[ $(dpkg --get-selections|grep -w "mlocate"|head -1) ]] || apt-get install mlocate -y &>/dev/null
-
-rm $(pwd)/$0 &> /dev/null
+# Create directories
+mkdir -p ${SCPdir} ${SCPusr} ${SCPfrm} ${SCPinst} ${SCPinstal}
 
 # Function to display colored messages
 msg () {
     BRAN='\033[1;37m' && VERMELHO='\e[31m' && VERDE='\e[32m' && AMARELO='\e[33m'
-    AZUL='\e[34m' && MAGENTA='\e[35m' && MAG='\033[1;36m' &&NEGRITO='\e[1m' && SEMCOR='\e[0m'
+    AZUL='\e[34m' && MAGENTA='\e[35m' && MAG='\033[1;36m' && NEGRITO='\e[1m' && SEMCOR='\e[0m'
     case $1 in
         -ne)cor="${VERMELHO}${NEGRITO}" && echo -ne "${cor}${2}${SEMCOR}";;
         -ama)cor="${AMARELO}${NEGRITO}" && echo -e "${cor}${2}${SEMCOR}";;
@@ -38,15 +37,9 @@ fun_ip () {
 
 # Function to install components
 inst_components () {
-    [[ $(dpkg --get-selections|grep -w "nano"|head -1) ]] || apt-get install nano -y &>/dev/null
-    [[ $(dpkg --get-selections|grep -w "bc"|head -1) ]] || apt-get install bc -y &>/dev/null
-    [[ $(dpkg --get-selections|grep -w "screen"|head -1) ]] || apt-get install screen -y &>/dev/null
-    [[ $(dpkg --get-selections|grep -w "python"|head -1) ]] || apt-get install python -y &>/dev/null
-    [[ $(dpkg --get-selections|grep -w "python3"|head -1) ]] || apt-get install python3 -y &>/dev/null
-    [[ $(dpkg --get-selections|grep -w "curl"|head -1) ]] || apt-get install curl -y &>/dev/null
-    [[ $(dpkg --get-selections|grep -w "ufw"|head -1) ]] || apt-get install ufw -y &>/dev/null
-    [[ $(dpkg --get-selections|grep -w "unzip"|head -1) ]] || apt-get install unzip -y &>/dev/null
-    [[ $(dpkg --get-selections|grep -w "zip"|head -1) ]] || apt-get install zip -y &>/dev/null
+    for pkg in nano bc screen python python3 curl unzip zip wget; do
+        [[ $(dpkg --get-selections|grep -w "$pkg"|head -1) ]] || apt-get install $pkg -y &>/dev/null
+    done
     [[ $(dpkg --get-selections|grep -w "apache2"|head -1) ]] || {
         apt-get install apache2 -y &>/dev/null
         sed -i "s;Listen 80;Listen 81;g" /etc/apache2/ports.conf
@@ -58,61 +51,26 @@ inst_components () {
 funcao_idioma () {
     msg -bar2
     declare -A idioma=( [1]="en English" [2]="fr French" [3]="de German" [4]="it Italian" [5]="pl Polish" [6]="pt Portuguese" [7]="es Spanish" [8]="tr Turkish" )
-    for ((i=1; i<=12; i++)); do
-        valor1="$(echo ${idioma[$i]}|cut -d' ' -f2)"
-        [[ -z $valor1 ]] && break
-        valor1="\033[1;32m[$i] > \033[1;33m$valor1"
-        while [[ ${#valor1} -lt 37 ]]; do
-            valor1=$valor1" "
-        done
-        echo -ne "$valor1"
-        let i++
-        valor2="$(echo ${idioma[$i]}|cut -d' ' -f2)"
-        [[ -z $valor2 ]] && {
-            echo -e " "
-            break
-        }
-        valor2="\033[1;32m[$i] > \033[1;33m$valor2"
-        while [[ ${#valor2} -lt 37 ]]; do
-            valor2=$valor2" "
-        done
-        echo -ne "$valor2"
-        let i++
-        valor3="$(echo ${idioma[$i]}|cut -d' ' -f2)"
-        [[ -z $valor3 ]] && {
-            echo -e " "
-            break
-        }
-        valor3="\033[1;32m[$i] > \033[1;33m$valor3"
-        while [[ ${#valor3} -lt 37 ]]; do
-            valor3=$valor3" "
-        done
-        echo -e "$valor3"
+    for ((i=1; i<=8; i++)); do
+        echo -ne "\033[1;32m[$i] > \033[1;33m${idioma[$i]}\n"
     done
     msg -bar2
-    unset selection
-    while [[ ${selection} != @([1-8]) ]]; do
-        echo -ne "\033[1;37mSELECT: " && read selection
-        tput cuu1 && tput dl1
-    done
-    pv="$(echo ${idioma[$selection]}|cut -d' ' -f1)"
-    [[ ${#id} -gt 2 ]] && id="pt" || id="$pv"
-    byinst="true"
+    echo -ne "\033[1;37mSelect Language: " && read selection
+    [[ -z $selection ]] && selection="1"
+    [[ ! $(echo "${selection}" | egrep '[1-8]') ]] && selection="1"
+    id="${idioma[$selection]}"
+    [[ -z $id ]] && id="en English"
+    echo "$id" > ${SCPidioma}
 }
 
 # Function to display installation completion message
 install_fim () {
-    msg -ama "$(source trans -b pt:${id} "Installation Complete, Use the Commands"|sed -e 's/[^a-z -]//ig')" && msg bar2
-    echo -e " menu / adm"
+    msg -ama "Installation Complete, Use the Commands: menu / adm"
     msg -bar2
 }
 
 # Function to verify and move files
 verificar_arq () {
-    [[ ! -d ${SCPdir} ]] && mkdir ${SCPdir}
-    [[ ! -d ${SCPusr} ]] && mkdir ${SCPusr}
-    [[ ! -d ${SCPfrm} ]] && mkdir ${SCPfrm}
-    [[ ! -d ${SCPinst} ]] && mkdir ${SCPinst}
     case $1 in
         "menu"|"message.txt")ARQ="${SCPdir}/";;
         "usercodes")ARQ="${SCPusr}/";;
@@ -131,41 +89,30 @@ verificar_arq () {
 
 # Main installation process
 fun_ip
-wget -O /usr/bin/trans https://raw.githubusercontent.com/lacasitamx/SCRIPTMOD-LACASITA/master/Install/trans &> /dev/null
 msg -bar2
 msg -ama "[ SCRIPT MOD LACASITA \033[1;37m ]\033[1;33m[OFFICIAL]"
-[[ $1 = "" ]] && funcao_idioma || {
-    [[ ${#1} -gt 2 ]] && funcao_idioma || id="$1"
-}
-
-echo "$IP" > /usr/bin/vendor_code
-sleep 1s
-function_verify
-updatedb
+funcao_idioma
 
 msg -bar2
-msg -ama "$(source trans -b pt:${id} "WELCOME, THANKS FOR USING"|sed -e 's/[^a-z -]//ig'): \033[1;31m[SCRIPT MOD LACASITA]"
+msg -ama "WELCOME, THANKS FOR USING: \033[1;31m[SCRIPT MOD LACASITA]"
 [[ ! -d ${SCPinstal} ]] && mkdir ${SCPinstal}
-pontos="."
-stopping="$(source trans -b pt:${id} "Verifying Updates"|sed -e 's/[^a-z -]//ig')"
-for arqx in $(ls ${SCPinstal}); do
-    msg -verm "${stopping}${pontos}"
-    tput cuu1 && tput dl1
-    pontos+="."
-    sleep 0.5
-done
-
-sleep 1s
-msg -bar2
-listaarqs="$(locate "lista-arq"|head -1)" && [[ -e ${listaarqs} ]] && rm $listaarqs
-cat /etc/bash.bashrc|grep -v '[[ $UID != 0 ]] && TMOUT=15 && export TMOUT' > /etc/bash.bashrc.2
-echo -e '[[ $UID != 0 ]] && TMOUT=15 && export TMOUT' >> /etc/bash.bashrc.2
-mv -f /etc/bash.bashrc.2 /etc/bash.bashrc
-echo "${SCPdir}/menu" > /usr/bin/menu && chmod +x /usr/bin/menu
-echo "${SCPdir}/menu" > /usr/bin/adm && chmod +x /usr/bin/adm
 inst_components
+
+# Simulating file downloads (replace with actual downloads if needed)
+echo "#!/bin/bash" > ${SCPinstal}/menu
+echo "echo 'Menu functionality not implemented yet.'" >> ${SCPinstal}/menu
+verificar_arq "menu"
+
+echo "This is a message" > ${SCPinstal}/message.txt
+verificar_arq "message.txt"
+
+# Create symbolic links
+ln -sf ${SCPdir}/menu /usr/bin/menu
+ln -sf ${SCPdir}/menu /usr/bin/adm
+
+# Clean up
 [[ -d ${SCPinstal} ]] && rm -rf ${SCPinstal}
-[[ ${#id} -gt 2 ]] && echo "pt" > ${SCPidioma} || echo "${id}" > ${SCPidioma}
-[[ ${byinst} = "true" ]] && install_fim
+
+install_fim
 
 # End of script
