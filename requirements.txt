@@ -1,5 +1,4 @@
 certbot
-python3-certbot-nginx
 nginx
 stunnel4
 dropbear
