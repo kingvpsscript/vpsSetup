@@ -6,8 +6,16 @@ LOG_FILE="/var/log/server_setup.log"
 
 # Function to log messages
 log_message() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
-    echo "$1"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
+}
+
+# Function to check if a command was successful
+check_command() {
+    if [ $? -ne 0 ]; then
+        log_message "Error: $1 failed"
+        return 1
+    fi
+    return 0
 }
 
 # Function to get user input for ports
@@ -47,19 +55,30 @@ get_domain() {
 # Function to update and upgrade system
 update_system() {
     log_message "Updating and upgrading system..."
-    sudo apt update && sudo apt upgrade -y
+    if ! sudo apt update && sudo apt upgrade -y; then
+        log_message "Error: System update failed"
+        return 1
+    fi
+    return 0
 }
 
 # Function to install necessary packages
 install_packages() {
     log_message "Installing necessary packages..."
-    sudo apt install -y curl wget unzip net-tools nginx build-essential certbot python3-certbot-nginx jq
+    if ! sudo apt install -y curl wget unzip net-tools python3 python3-pip dropbear stunnel4 nginx build-essential certbot python3-certbot-nginx jq ufw; then
+        log_message "Error: Package installation failed"
+        return 1
+    fi
+    return 0
 }
 
 # Function to install and configure V2Ray
 install_v2ray() {
     log_message "Installing and configuring V2Ray..."
-    bash <(curl -L https://raw.githubusercontent.com/v2fly/fhs-install-v2ray/master/install-release.sh)
+    if ! bash <(curl -L https://raw.githubusercontent.com/v2fly/fhs-install-v2ray/master/install-release.sh); then
+        log_message "Error: V2Ray installation failed"
+        return 1
+    fi
     
     local uuid=$(uuidgen)
     local config_file="/usr/local/etc/v2ray/config.json"
@@ -70,13 +89,17 @@ install_v2ray() {
         generate_v2ray_config_no_tls "$config_file" "$uuid"
     fi
 
-    systemctl start v2ray
+    if ! systemctl start v2ray; then
+        log_message "Error: Failed to start V2Ray"
+        return 1
+    fi
     systemctl enable v2ray
     
     echo "V2RAY_UUID=$uuid" >> "$CONFIG_FILE"
+    return 0
 }
 
-# Function to generate V2Ray config with TLS (VLESS and VMESS)
+# Function to generate V2Ray config with TLS
 generate_v2ray_config_tls() {
     local config_file=$1
     local uuid=$2
@@ -84,7 +107,7 @@ generate_v2ray_config_tls() {
 {
   "inbounds": [
     {
-      "port": $V2RAY_VLESS_PORT,
+      "port": $V2RAY_PORT,
       "protocol": "vless",
       "settings": {
         "clients": [
@@ -98,25 +121,16 @@ generate_v2ray_config_tls() {
       "streamSettings": {
         "network": "ws",
         "wsSettings": {
-          "path": "$V2RAY_VLESS_WS_PATH"
-        }
-      }
-    },
-    {
-      "port": $V2RAY_VMESS_PORT,
-      "protocol": "vmess",
-      "settings": {
-        "clients": [
-          {
-            "id": "$uuid",
-            "alterId": 0
-          }
-        ]
-      },
-      "streamSettings": {
-        "network": "ws",
-        "wsSettings": {
-          "path": "$V2RAY_VMESS_WS_PATH"
+          "path": "$V2RAY_WS_PATH"
+        },
+        "security": "tls",
+        "tlsSettings": {
+          "certificates": [
+            {
+              "certificateFile": "/etc/letsencrypt/live/$DOMAIN/fullchain.pem",
+              "keyFile": "/etc/letsencrypt/live/$DOMAIN/privkey.pem"
+            }
+          ]
         }
       }
     }
@@ -130,7 +144,7 @@ generate_v2ray_config_tls() {
 EOF
 }
 
-# Function to generate V2Ray config without TLS (VLESS and VMESS)
+# Function to generate V2Ray config without TLS
 generate_v2ray_config_no_tls() {
     local config_file=$1
     local uuid=$2
@@ -138,7 +152,7 @@ generate_v2ray_config_no_tls() {
 {
   "inbounds": [
     {
-      "port": $V2RAY_VLESS_PORT,
+      "port": $V2RAY_PORT,
       "protocol": "vless",
       "settings": {
         "clients": [
@@ -152,25 +166,7 @@ generate_v2ray_config_no_tls() {
       "streamSettings": {
         "network": "ws",
         "wsSettings": {
-          "path": "$V2RAY_VLESS_WS_PATH"
-        }
-      }
-    },
-    {
-      "port": $V2RAY_VMESS_PORT,
-      "protocol": "vmess",
-      "settings": {
-        "clients": [
-          {
-            "id": "$uuid",
-            "alterId": 0
-          }
-        ]
-      },
-      "streamSettings": {
-        "network": "ws",
-        "wsSettings": {
-          "path": "$V2RAY_VMESS_WS_PATH"
+          "path": "$V2RAY_WS_PATH"
         }
       }
     }
@@ -182,6 +178,52 @@ generate_v2ray_config_no_tls() {
   ]
 }
 EOF
+}
+
+# Function to configure SSH
+configure_ssh() {
+    log_message "Configuring SSH..."
+    sed -i "s/#Port 22/Port $SSH_PORT/" /etc/ssh/sshd_config
+    if ! systemctl restart sshd; then
+        log_message "Error: Failed to restart SSH service"
+        return 1
+    fi
+    return 0
+}
+
+# Function to configure Dropbear
+configure_dropbear() {
+    log_message "Configuring Dropbear..."
+    sed -i "s/NO_START=1/NO_START=0/" /etc/default/dropbear
+    sed -i "s/DROPBEAR_PORT=22/DROPBEAR_PORT=$DROPBEAR_PORT/" /etc/default/dropbear
+    if ! systemctl restart dropbear; then
+        log_message "Error: Failed to restart Dropbear service"
+        return 1
+    fi
+    return 0
+}
+
+# Function to configure SSL
+configure_ssl() {
+    log_message "Configuring SSL..."
+    cat << EOF > /etc/stunnel/stunnel.conf
+pid = /var/run/stunnel.pid
+cert = /etc/letsencrypt/live/$DOMAIN/fullchain.pem
+key = /etc/letsencrypt/live/$DOMAIN/privkey.pem
+client = no
+socket = l:TCP_NODELAY=1
+socket = r:TCP_NODELAY=1
+
+[dropbear]
+accept = $SSL_PORT
+connect = 127.0.0.1:$DROPBEAR_PORT
+EOF
+
+    if ! systemctl restart stunnel4; then
+        log_message "Error: Failed to restart Stunnel service"
+        return 1
+    fi
+    return 0
 }
 
 # Function to configure Nginx for WebSocket
@@ -205,9 +247,9 @@ server {
     ssl_prefer_server_ciphers on;
     ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384;
 
-    location $V2RAY_VLESS_WS_PATH {
+    location $V2RAY_WS_PATH {
         proxy_redirect off;
-        proxy_pass http://127.0.0.1:$V2RAY_VLESS_PORT;
+        proxy_pass http://127.0.0.1:$V2RAY_PORT;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -216,9 +258,9 @@ server {
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
     }
 
-    location $V2RAY_VMESS_WS_PATH {
+    location $SSH_WS_PATH {
         proxy_redirect off;
-        proxy_pass http://127.0.0.1:$V2RAY_VMESS_PORT;
+        proxy_pass http://127.0.0.1:$SSH_PORT;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -230,7 +272,107 @@ server {
 EOF
 
     ln -sf /etc/nginx/sites-available/websocket /etc/nginx/sites-enabled/
-    nginx -t && systemctl restart nginx
+    if ! nginx -t; then
+        log_message "Error: Nginx configuration test failed"
+        return 1
+    fi
+    if ! systemctl restart nginx; then
+        log_message "Error: Failed to restart Nginx service"
+        return 1
+    fi
+    return 0
+}
+
+# Function to setup Python Proxy
+setup_python_proxy() {
+    log_message "Setting up Python Proxy..."
+    if ! pip3 install websockets; then
+        log_message "Error: Failed to install websockets library"
+        return 1
+    fi
+
+    cat << EOF > /root/custom_proxy.py
+import asyncio
+import websockets
+import ssl
+
+class WebSocketProxy:
+    def __init__(self, listen_host, listen_port):
+        self.listen_host = listen_host
+        self.listen_port = listen_port
+
+    async def handle_connection(self, websocket, path):
+        try:
+            # Perform any authentication or initial setup here if needed
+            
+            # This is where you would typically establish a connection to the actual backend server
+            # For demonstration, we'll just echo messages back
+            async for message in websocket:
+                await websocket.send(f"Echo: {message}")
+        except websockets.exceptions.ConnectionClosed:
+            pass
+
+    async def run(self):
+        server = await websockets.serve(
+            self.handle_connection,
+            self.listen_host,
+            self.listen_port,
+            process_request=self.process_request
+        )
+        await server.wait_closed()
+
+    async def process_request(self, path, headers):
+        # This method allows us to handle the HTTP Upgrade request
+        # and return a 101 Switching Protocols response
+        return None
+
+if __name__ == '__main__':
+    proxy = WebSocketProxy('0.0.0.0', $PYTHON_PROXY_PORT)
+    asyncio.get_event_loop().run_until_complete(proxy.run())
+EOF
+
+    create_systemd_service "python-proxy" "/usr/bin/python3 /root/custom_proxy.py"
+    return 0
+}
+
+# Function to install and configure BadVPN
+setup_badvpn() {
+    log_message "Setting up BadVPN..."
+    if ! wget -O /usr/bin/badvpn-udpgw "https://raw.githubusercontent.com/daybreakersx/premscript/master/badvpn-udpgw64"; then
+        log_message "Error: Failed to download BadVPN"
+        return 1
+    fi
+    chmod +x /usr/bin/badvpn-udpgw
+
+    create_systemd_service "badvpn" "/usr/bin/badvpn-udpgw --listen-addr 127.0.0.1:$BADVPN_PORT --max-clients 1000 --max-connections-for-client 10"
+    return 0
+}
+
+# Function to create a systemd service
+create_systemd_service() {
+    local service_name=$1
+    local exec_start=$2
+
+    cat << EOF > /etc/systemd/system/${service_name}.service
+[Unit]
+Description=$service_name
+After=network.target
+
+[Service]
+ExecStart=$exec_start
+Restart=always
+User=root
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    if ! systemctl start $service_name; then
+        log_message "Error: Failed to start $service_name service"
+        return 1
+    fi
+    systemctl enable $service_name
+    return 0
 }
 
 # Function to optimize system performance
@@ -247,108 +389,43 @@ optimize_system() {
     sed -i 's/# multi_accept.*/multi_accept on;/' /etc/nginx/nginx.conf
     sed -i 's/# tcp_nopush.*/tcp_nopush on;/' /etc/nginx/nginx.conf
     sed -i 's/# tcp_nodelay.*/tcp_nodelay on;/' /etc/nginx/nginx.conf
-    systemctl restart nginx
+    if ! systemctl restart nginx; then
+        log_message "Error: Failed to restart Nginx after optimization"
+        return 1
+    fi
+    return 0
 }
 
-# Function to add a V2Ray user (VLESS and VMESS)
-add_v2ray_user() {
-    local username=$1
-    local uuid=$(uuidgen)
-    local config_file="/usr/local/etc/v2ray/config.json"
-    
-    # Add user to VLESS
-    jq ".inbounds[0].settings.clients += [{\"id\": \"$uuid\", \"level\": 0, \"email\": \"$username\"}]" "$config_file" > "$config_file.tmp"
-    mv "$config_file.tmp" "$config_file"
-    
-    # Add user to VMESS
-    jq ".inbounds[1].settings.clients += [{\"id\": \"$uuid\", \"alterId\": 0, \"email\": \"$username\"}]" "$config_file" > "$config_file.tmp"
-    mv "$config_file.tmp" "$config_file"
-    
-    systemctl restart v2ray
-    echo "Added V2Ray user: $username with UUID: $uuid"
+# Function to configure firewall
+configure_firewall() {
+    log_message "Configuring firewall..."
+    ufw default deny incoming
+    ufw default allow outgoing
+    ufw allow $SSH_PORT/tcp
+    ufw allow $DROPBEAR_PORT/tcp
+    ufw allow $SSL_PORT/tcp
+    ufw allow $V2RAY_PORT/tcp
+    ufw allow 80/tcp
+    ufw allow 443/tcp
+    ufw allow $PYTHON_PROXY_PORT/tcp
+    ufw allow $BADVPN_PORT/udp
+    if ! ufw --force enable; then
+        log_message "Error: Failed to enable firewall"
+        return 1
+    fi
+    return 0
 }
 
-# Function to list V2Ray users
-list_v2ray_users() {
-    echo "V2Ray VLESS Users:"
-    echo "------------------"
-    jq -r '.inbounds[0].settings.clients[] | .email' /usr/local/etc/v2ray/config.json
-    
-    echo
-    echo "V2Ray VMESS Users:"
-    echo "------------------"
-    jq -r '.inbounds[1].settings.clients[] | .email' /usr/local/etc/v2ray/config.json
-}
-
-# Function to remove V2Ray user
-remove_v2ray_user() {
-    local username=$1
-    local config_file="/usr/local/etc/v2ray/config.json"
-    
-    # Remove user from VLESS
-    jq --arg user "$username" '.inbounds[0].settings.clients = [.inbounds[0].settings.clients[] | select(.email != $user)]' "$config_file" > "$config_file.tmp"
-    mv "$config_file.tmp" "$config_file"
-    
-    # Remove user from VMESS
-    jq --arg user "$username" '.inbounds[1].settings.clients = [.inbounds[1].settings.clients[] | select(.email != $user)]' "$config_file" > "$config_file.tmp"
-    mv "$config_file.tmp" "$config_file"
-    
-    systemctl restart v2ray
-    echo "Removed V2Ray user: $username"
-}
-
-# Function to change a port
-change_port() {
-    local service=$1
-    local new_port=$2
-    
-    case $service in
-        v2ray_vless)
-            jq ".inbounds[0].port = $new_port" /usr/local/etc/v2ray/config.json > /usr/local/etc/v2ray/config.json.tmp
-            mv /usr/local/etc/v2ray/config.json.tmp /usr/local/etc/v2ray/config.json
-            systemctl restart v2ray
-            ;;
-        v2ray_vmess)
-            jq ".inbounds[1].port = $new_port" /usr/local/etc/v2ray/config.json > /usr/local/etc/v2ray/config.json.tmp
-            mv /usr/local/etc/v2ray/config.json.tmp /usr/local/etc/v2ray/config.json
-            systemctl restart v2ray
-            ;;
-        websocket)
-            sed -i "s/listen .*/listen $new_port ssl http2;/" /etc/nginx/sites-available/websocket
-            systemctl restart nginx
-            ;;
-        *)
-            echo "Unknown service: $service"
-            return 1
-            ;;
-    esac
-    
-    sed -i "s/^${service^^}_PORT=.*/${service^^}_PORT=$new_port/" "$CONFIG_FILE"
-    echo "Changed $service port to $new_port"
-}
-
-# Function to update domain
-update_domain() {
-    local new_domain=$1
-    sed -i "s/^DOMAIN=.*/DOMAIN=$new_domain/" "$CONFIG_FILE"
-    
-    certbot certonly --nginx -d $new_domain
-    
-    sed -i "s/server_name .*/server_name $new_domain;/" /etc/nginx/sites-available/websocket
-    
-    systemctl restart nginx
-    
-    echo "Updated domain to $new_domain"
-}
-
-# Function to list configured ports
-list_ports() {
-    echo "Configured Ports:"
-    echo "----------------"
-    grep "_PORT=" "$CONFIG_FILE" | while read -r line; do
-        service=$(echo "$line" | cut -d'_' -f1)
-        port=$(echo "$line" | cut -d'=' -f2)
-        echo "$service: $port"
+# Function to check services status
+check_services_status() {
+    log_message "Checking services status..."
+    services=("sshd" "dropbear" "stunnel4" "nginx" "v2ray" "python-proxy" "badvpn")
+    for service in "${services[@]}"; do
+        status=$(systemctl is-active $service)
+        log_message "$service status: $status"
+        if [ "$status" != "active" ]; then
+            log_message "Warning: $service is not active. Check configuration and logs."
+        fi
     done
 }
 
@@ -359,33 +436,197 @@ main() {
     # Get user inputs
     DOMAIN=$(get_domain)
     USE_TLS=$(get_yes_no "Use TLS?")
-    V2RAY_VLESS_PORT=$(get_port "V2Ray VLESS" 8443)
-    V2RAY_VMESS_PORT=$(get_port "V2Ray VMESS" 8444)
-    V2RAY_VLESS_WS_PATH=$(get_custom_path "V2Ray VLESS WebSocket" "/vless")
-    V2RAY_VMESS_WS_PATH=$(get_custom_path "V2Ray VMESS WebSocket" "/vmess")
+    V2RAY_PORT=$(get_port "V2Ray" 8443)
+    SSH_PORT=$(get_port "SSH" 22)
+    DROPBEAR_PORT=$(get_port "Dropbear" 444)
+    SSL_PORT=$(get_port "SSL" 443)
+    PYTHON_PROXY_PORT=$(get_port "Python Proxy" 8080)
+    BADVPN_PORT=$(get_port "BadVPN" 7300)
+    V2RAY_WS_PATH=$(get_custom_path "V2Ray WebSocket" "/v2ray")
+    SSH_WS_PATH=$(get_custom_path "SSH WebSocket" "/ssh")
 
     # Save configuration
     cat << EOF > "$CONFIG_FILE"
 DOMAIN=$DOMAIN
 USE_TLS=$USE_TLS
-V2RAY_VLESS_PORT=$V2RAY_VLESS_PORT
-V2RAY_VMESS_PORT=$V2RAY_VMESS_PORT
-V2RAY_VLESS_WS_PATH=$V2RAY_VLESS_WS_PATH
-V2RAY_VMESS_WS_PATH=$V2RAY_VMESS_WS_PATH
+V2RAY_PORT=$V2RAY_PORT
+SSH_PORT=$SSH_PORT
+DROPBEAR_PORT=$DROPBEAR_PORT
+SSL_PORT=$SSL_PORT
+PYTHON_PROXY_PORT=$PYTHON_PROXY_PORT
+BADVPN_PORT=$BADVPN_PORT
+V2RAY_WS_PATH=$V2RAY_WS_PATH
+SSH_WS_PATH=$SSH_WS_PATH
 EOF
 
     # Update and install packages
-    update_system
-    install_packages
+    update_system || return 1
+    install_packages || return 1
 
     # Setup services
-    install_v2ray
-    configure_nginx
+    install_v2ray || return 1
+    configure_ssh || return 1
+    configure_dropbear || return 1
+    configure_ssl || return 1
+    configure_nginx || return 1
+    setup_python_proxy || return 1
+    setup_badvpn || return 1
 
     # Optimize system
-    optimize_system
+    optimize_system || return 1
+
+    # Configure firewall
+    configure_firewall || return 1
+
+    # Check services status
+    check_services_status
 
     log_message "VPN server setup completed successfully."
+}
+
+# Function to add an SSH user
+add_ssh_user() {
+    local username=$1
+    local password=$2
+    useradd -m -s /bin/bash "$username"
+    echo "$username:$password" | chpasswd
+    log_message "Added SSH user: $username"
+}
+
+# Function to list SSH users
+list_ssh_users() {
+    log_message "SSH Users:"
+    log_message "----------"
+    awk -F: '$3 >= 1000 && $1 != "nobody" {print $1}' /etc/passwd
+}
+
+# Function to remove SSH user
+remove_ssh_user() {
+    local username=$1
+    userdel -r "$username"
+    log_message "Removed SSH user: $username"
+}
+
+# Function to add a V2Ray user
+add_v2ray_user() {
+    local username=$1
+    local uuid=$(uuidgen)
+    local config_file="/usr/local/etc/v2ray/config.json"
+    
+    jq ".inbounds[0].settings.clients += [{\"id\": \"$uuid\", \"level\": 0, \"email\": \"$username\"}]" "$config_file" > "$config_file.tmp"
+    mv "$config_file.tmp" "$config_file"
+    
+    if ! systemctl restart v2ray; then
+        log_message "Error: Failed to restart V2Ray after adding user"
+        return 1
+    fi
+    log_message "Added V2Ray user: $username with UUID: $uuid"
+}
+
+# Function to list V2Ray users
+list_v2ray_users() {
+    log_message "V2Ray Users:"
+    log_message "------------"
+    jq -r '.inbounds[0].settings.clients[] | .email' /usr/local/etc/v2ray/config.json
+}
+
+# Function to remove V2Ray user
+remove_v2ray_user() {
+    local username=$1
+    local config_file="/usr/local/etc/v2ray/config.json"
+    
+    jq --arg user "$username" '.inbounds[0].settings.clients = [.inbounds[0].settings.clients[] | select(.email != $user)]' "$config_file" > "$config_file.tmp"
+    mv "$config_file.tmp" "$config_file"
+    
+    if ! systemctl restart v2ray; then
+        log_message "Error: Failed to restart V2Ray after removing user"
+        return 1
+    fi
+    log_message "Removed V2Ray user: $username"
+}
+
+# Function to change a port
+change_port() {
+    local service=$1
+    local new_port=$2
+    
+    case $service in
+        v2ray)
+            sed -i "s/\"port\": [0-9]*/\"port\": $new_port/" /usr/local/etc/v2ray/config.json
+            systemctl restart v2ray
+            ;;
+        ssh)
+            sed -i "s/^Port .*/Port $new_port/" /etc/ssh/sshd_config
+            systemctl restart sshd
+            ;;
+        dropbear)
+            sed -i "s/DROPBEAR_PORT=.*/DROPBEAR_PORT=$new_port/" /etc/default/dropbear
+            systemctl restart dropbear
+            ;;
+        ssl)
+            sed -i "s/accept = .*/accept = $new_port/" /etc/stunnel/stunnel.conf
+            systemctl restart stunnel4
+            ;;
+        websocket)
+            sed -i "s/listen .*/listen $new_port ssl http2;/" /etc/nginx/sites-available/websocket
+            systemctl restart nginx
+            ;;
+        python_proxy)
+            sed -i "s/port=.*/port=$new_port/" /root/custom_proxy.py
+            systemctl restart python-proxy
+            ;;
+        badvpn)
+            sed -i "s/--listen-addr 127.0.0.1:[0-9]*/--listen-addr 127.0.0.1:$new_port/" /etc/systemd/system/badvpn.service
+            systemctl daemon-reload
+            systemctl restart badvpn
+            ;;
+        *)
+            log_message "Error: Unknown service: $service"
+            return 1
+            ;;
+    esac
+    
+    sed -i "s/^${service^^}_PORT=.*/${service^^}_PORT=$new_port/" "$CONFIG_FILE"
+    log_message "Changed $service port to $new_port"
+    
+    # Update firewall rules
+    ufw delete allow $old_port
+    ufw allow $new_port
+    log_message "Updated firewall rules for new port"
+}
+
+# Function to update domain
+update_domain() {
+    local new_domain=$1
+    sed -i "s/^DOMAIN=.*/DOMAIN=$new_domain/" "$CONFIG_FILE"
+    
+    if ! certbot certonly --nginx -d $new_domain; then
+        log_message "Error: Failed to obtain SSL certificate for new domain"
+        return 1
+    fi
+    
+    sed -i "s/server_name .*/server_name $new_domain;/" /etc/nginx/sites-available/websocket
+    
+    sed -i "s|cert = .*|cert = /etc/letsencrypt/live/$new_domain/fullchain.pem|" /etc/stunnel/stunnel.conf
+    sed -i "s|key = .*|key = /etc/letsencrypt/live/$new_domain/privkey.pem|" /etc/stunnel/stunnel.conf
+    
+    if ! systemctl restart nginx stunnel4; then
+        log_message "Error: Failed to restart Nginx and Stunnel after domain update"
+        return 1
+    fi
+    
+    log_message "Updated domain to $new_domain"
+}
+
+# Function to list configured ports
+list_ports() {
+    log_message "Configured Ports:"
+    log_message "----------------"
+    grep "_PORT=" "$CONFIG_FILE" | while read -r line; do
+        service=$(echo "$line" | cut -d'_' -f1)
+        port=$(echo "$line" | cut -d'=' -f2)
+        log_message "$service: $port"
+    done
 }
 
 # Function to handle admin tasks
@@ -393,19 +634,79 @@ admin_menu() {
     while true; do
         echo
         echo "VPN Admin Menu"
-        echo "1. Add V2Ray User"
-        echo "2. List V2Ray Users"
-        echo "3. Remove V2Ray User"
-        echo "4. Change Port"
-        echo "5. Update Domain"
-        echo "6. List Configured Ports"
-        echo "7. Exit"
+        echo "1. Add SSH User"
+        echo "2. List SSH Users"
+        echo "3. Remove SSH User"
+        echo "4. Add V2Ray User"
+        echo "5. List V2Ray Users"
+        echo "6. Remove V2Ray User"
+        echo "7. Change Port"
+        echo "8. Update Domain"
+        echo "9. List Configured Ports"
+        echo "10. Check Services Status"
+        echo "11. Exit"
         read -p "Enter your choice: " choice
         
         case $choice in
             1)
+                read -p "Enter username for new SSH user: " username
+                read -s -p "Enter password for new SSH user: " password
+                echo
+                add_ssh_user "$username" "$password"
+                ;;
+            2)
+                list_ssh_users
+                ;;
+            3)
+                read -p "Enter username of SSH user to remove: " username
+                remove_ssh_user "$username"
+                ;;
+            4)
                 read -p "Enter username for new V2Ray user: " username
                 add_v2ray_user "$username"
                 ;;
-            2)
-                list_v2ray
+            5)
+                list_v2ray_users
+                ;;
+            6)
+                read -p "Enter username of V2Ray user to remove: " username
+                remove_v2ray_user "$username"
+                ;;
+            7)
+                read -p "Enter service name (v2ray/ssh/dropbear/ssl/websocket/python_proxy/badvpn): " service
+                read -p "Enter new port number: " new_port
+                change_port "$service" "$new_port"
+                ;;
+            8)
+                read -p "Enter new domain name: " new_domain
+                update_domain "$new_domain"
+                ;;
+            9)
+                list_ports
+                ;;
+            10)
+                check_services_status
+                ;;
+            11)
+                return
+                ;;
+            *)
+                log_message "Invalid choice. Please try again."
+                ;;
+        esac
+        
+        echo
+    done
+}
+
+# Run the main function if the script is executed directly
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    if [ "$1" = "setup" ]; then
+        main
+    elif [ "$1" = "admin" ]; then
+        admin_menu
+    else
+        echo "Usage: $0 [setup|admin]"
+        exit 1
+    fi
+fi
