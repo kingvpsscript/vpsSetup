@@ -1,5 +1,4 @@
 certbot
-nginx
 stunnel4
 dropbear
 v2ray
