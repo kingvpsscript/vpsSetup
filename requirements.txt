@@ -1,13 +1,2 @@
 certbot
-stunnel4
-dropbear
-v2ray
-jq
-ufw
-fail2ban
-unzip
-wget
-curl
-python3-pip
 proxy.py
-certbot-nginx
