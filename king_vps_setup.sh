@@ -55,10 +55,12 @@ install_packages() {
     log_message "Installing necessary packages..."
     sudo apt install -y curl wget unzip net-tools python3 python3-pip dropbear stunnel4 nginx build-essential jq
     
-    # Install Certbot using pip
+    # Install Certbot and its Nginx plugin using pip
     pip3 install certbot certbot-nginx
+    
+    # Install other Python dependencies
+    pip3 install -r requirements.txt
 }
-
 # Function to install and configure V2Ray
 install_v2ray() {
     log_message "Installing and configuring V2Ray..."
