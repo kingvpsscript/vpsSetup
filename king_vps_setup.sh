@@ -53,38 +53,38 @@ update_system() {
 # Function to install necessary packages
 install_packages() {
     log_message "Installing necessary packages..."
-    sudo apt install -y curl wget unzip net-tools python3 python3-pip dropbear stunnel4 nginx build-essential jq
-    
+    sudo apt install -y curl wget unzip net-tools python3 python3-pip dropbear stunnel4 nginx build-essential jq uuid-runtime
+
     # Install Certbot and its Nginx plugin using pip
     pip3 install certbot certbot-nginx
-    
+
     # Install other Python dependencies
-    pip3 install -r requirements.txt
+    pip3 install websockets
 }
+
 # Function to install and configure V2Ray
 install_v2ray() {
     log_message "Installing and configuring V2Ray..."
     bash <(curl -L https://raw.githubusercontent.com/v2fly/fhs-install-v2ray/master/install-release.sh)
-    
+
     local uuid=$(uuidgen)
+    local vmess_uuid=$(uuidgen)
     local config_file="/usr/local/etc/v2ray/config.json"
-    
-    if [ "$USE_TLS" = true ]; then
-        generate_v2ray_config_tls "$config_file" "$uuid"
-    else
-        generate_v2ray_config_no_tls "$config_file" "$uuid"
-    fi
+
+    generate_v2ray_config "$config_file" "$uuid" "$vmess_uuid"
 
     systemctl start v2ray
     systemctl enable v2ray
-    
+
     echo "V2RAY_UUID=$uuid" >> "$CONFIG_FILE"
+    echo "VMESS_UUID=$vmess_uuid" >> "$CONFIG_FILE"
 }
 
-# Function to generate V2Ray config with TLS
-generate_v2ray_config_tls() {
+# Function to generate V2Ray config
+generate_v2ray_config() {
     local config_file=$1
     local uuid=$2
+    local vmess_uuid=$3
     cat << EOF > "$config_file"
 {
   "inbounds": [
@@ -106,40 +106,22 @@ generate_v2ray_config_tls() {
           "path": "$V2RAY_WS_PATH"
         }
       }
-    }
-  ],
-  "outbounds": [
+    },
     {
-      "protocol": "freedom"
-    }
-  ]
-}
-EOF
-}
-
-# Function to generate V2Ray config without TLS
-generate_v2ray_config_no_tls() {
-    local config_file=$1
-    local uuid=$2
-    cat << EOF > "$config_file"
-{
-  "inbounds": [
-    {
-      "port": $V2RAY_PORT,
-      "protocol": "vless",
+      "port": $VMESS_PORT,
+      "protocol": "vmess",
       "settings": {
         "clients": [
           {
-            "id": "$uuid",
-            "level": 0
+            "id": "$vmess_uuid",
+            "alterId": 0
           }
-        ],
-        "decryption": "none"
+        ]
       },
       "streamSettings": {
         "network": "ws",
         "wsSettings": {
-          "path": "$V2RAY_WS_PATH"
+          "path": "$VMESS_WS_PATH"
         }
       }
     }
@@ -219,9 +201,20 @@ server {
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
     }
 
+    location $VMESS_WS_PATH {
+        proxy_redirect off;
+        proxy_pass http://127.0.0.1:$VMESS_PORT;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$http_host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    }
+
     location $SSH_WS_PATH {
         proxy_redirect off;
-        proxy_pass http://127.0.0.1:$SSH_PORT;
+        proxy_pass http://127.0.0.1:$PYTHON_PROXY_PORT;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -239,31 +232,41 @@ EOF
 # Function to setup Python Proxy
 setup_python_proxy() {
     log_message "Setting up Python Proxy..."
-    pip3 install proxy.py
-
     cat << EOF > /root/custom_proxy.py
-import time
-from proxy import ProxyServer, ProxyHandler
+import asyncio
+import websockets
 
-class CustomHandler(ProxyHandler):
-    def handle_client_request(self, request):
-        if request.method == 'CONNECT':
-            self.send_response(200, 'Connection Established')
-            self.send_header('Proxy-Agent', 'Custom Python Proxy')
-            self.end_headers()
-        else:
-            super().handle_client_request(request)
+async def proxy_handler(websocket, path):
+    try:
+        remote_host, remote_port = "127.0.0.1", $DROPBEAR_PORT
+        reader, writer = await asyncio.open_connection(remote_host, remote_port)
+        
+        async def forward(source, destination):
+            try:
+                while True:
+                    data = await source()
+                    if not data:
+                        break
+                    await destination(data)
+            except Exception as e:
+                print(f"Forward error: {e}")
+            finally:
+                writer.close()
+                await websocket.close()
 
-    def handle_client_connection(self, conn, addr):
-        conn.sendall(b"HTTP/1.1 101 Switching Protocols\r\n")
-        conn.sendall(b"Upgrade: websocket\r\n")
-        conn.sendall(b"Connection: Upgrade\r\n")
-        conn.sendall(b"\r\n")
-        super().handle_client_connection(conn, addr)
+        await asyncio.gather(
+            forward(websocket.recv, writer.write),
+            forward(reader.read, websocket.send)
+        )
+    except Exception as e:
+        print(f"Proxy error: {e}")
 
-if __name__ == '__main__':
-    proxy = ProxyServer(hostname='0.0.0.0', port=$PYTHON_PROXY_PORT, handler_class=CustomHandler)
-    proxy.run()
+async def main():
+    server = await websockets.serve(proxy_handler, "0.0.0.0", $PYTHON_PROXY_PORT)
+    await server.wait_closed()
+
+if __name__ == "__main__":
+    asyncio.run(main())
 EOF
 
     create_systemd_service "python-proxy" "/usr/bin/python3 /root/custom_proxy.py"
@@ -345,13 +348,19 @@ remove_ssh_user() {
 add_v2ray_user() {
     local username=$1
     local uuid=$(uuidgen)
+    local vmess_uuid=$(uuidgen)
     local config_file="/usr/local/etc/v2ray/config.json"
-    
+
     jq ".inbounds[0].settings.clients += [{\"id\": \"$uuid\", \"level\": 0, \"email\": \"$username\"}]" "$config_file" > "$config_file.tmp"
     mv "$config_file.tmp" "$config_file"
-    
+
+    jq ".inbounds[1].settings.clients += [{\"id\": \"$vmess_uuid\", \"alterId\": 0, \"email\": \"$username\"}]" "$config_file" > "$config_file.tmp"
+    mv "$config_file.tmp" "$config_file"
+
     systemctl restart v2ray
-    echo "Added V2Ray user: $username with UUID: $uuid"
+    echo "Added V2Ray user: $username"
+    echo "VLESS UUID: $uuid"
+    echo "VMess UUID: $vmess_uuid"
 }
 
 # Function to list V2Ray users
@@ -359,16 +368,20 @@ list_v2ray_users() {
     echo "V2Ray Users:"
     echo "------------"
     jq -r '.inbounds[0].settings.clients[] | .email' /usr/local/etc/v2ray/config.json
+    jq -r '.inbounds[1].settings.clients[] | .email' /usr/local/etc/v2ray/config.json
 }
 
 # Function to remove V2Ray user
 remove_v2ray_user() {
     local username=$1
     local config_file="/usr/local/etc/v2ray/config.json"
-    
+
     jq --arg user "$username" '.inbounds[0].settings.clients = [.inbounds[0].settings.clients[] | select(.email != $user)]' "$config_file" > "$config_file.tmp"
     mv "$config_file.tmp" "$config_file"
-    
+
+    jq --arg user "$username" '.inbounds[1].settings.clients = [.inbounds[1].settings.clients[] | select(.email != $user)]' "$config_file" > "$config_file.tmp"
+    mv "$config_file.tmp" "$config_file"
+
     systemctl restart v2ray
     echo "Removed V2Ray user: $username"
 }
@@ -377,9 +390,13 @@ remove_v2ray_user() {
 change_port() {
     local service=$1
     local new_port=$2
-    
+
     case $service in
         v2ray)
+            sed -i "s/\"port\": [0-9]*/\"port\": $new_port/" /usr/local/etc/v2ray/config.json
+            systemctl restart v2ray
+            ;;
+        vmess)
             sed -i "s/\"port\": [0-9]*/\"port\": $new_port/" /usr/local/etc/v2ray/config.json
             systemctl restart v2ray
             ;;
@@ -388,6 +405,8 @@ change_port() {
             systemctl restart sshd
             ;;
         dropbear)
+            sed -i "s/DROPBEAR_PORT=.*/DROPBEAR_PORT=$new_port/" /etc/default/dropbear
+                    dropbear)
             sed -i "s/DROPBEAR_PORT=.*/DROPBEAR_PORT=$new_port/" /etc/default/dropbear
             systemctl restart dropbear
             ;;
@@ -400,7 +419,7 @@ change_port() {
             systemctl restart nginx
             ;;
         python_proxy)
-            sed -i "s/port=.*/port=$new_port/" /root/custom_proxy.py
+            sed -i "s/server = await websockets.serve(proxy_handler, \"0.0.0.0\", [0-9]*)/server = await websockets.serve(proxy_handler, \"0.0.0.0\", $new_port)/" /root/custom_proxy.py
             systemctl restart python-proxy
             ;;
         badvpn)
@@ -413,7 +432,7 @@ change_port() {
             return 1
             ;;
     esac
-    
+
     sed -i "s/^${service^^}_PORT=.*/${service^^}_PORT=$new_port/" "$CONFIG_FILE"
     echo "Changed $service port to $new_port"
 }
@@ -422,16 +441,16 @@ change_port() {
 update_domain() {
     local new_domain=$1
     sed -i "s/^DOMAIN=.*/DOMAIN=$new_domain/" "$CONFIG_FILE"
-    
+
     certbot certonly --nginx -d $new_domain
-    
+
     sed -i "s/server_name .*/server_name $new_domain;/" /etc/nginx/sites-available/websocket
-    
+
     sed -i "s|cert = .*|cert = /etc/letsencrypt/live/$new_domain/fullchain.pem|" /etc/stunnel/stunnel.conf
     sed -i "s|key = .*|key = /etc/letsencrypt/live/$new_domain/privkey.pem|" /etc/stunnel/stunnel.conf
-    
+
     systemctl restart nginx stunnel4
-    
+
     echo "Updated domain to $new_domain"
 }
 
@@ -452,27 +471,29 @@ main() {
 
     # Get user inputs
     DOMAIN=$(get_domain)
-    USE_TLS=$(get_yes_no "Use TLS?")
     V2RAY_PORT=$(get_port "V2Ray" 8443)
+    VMESS_PORT=$(get_port "VMess" 8444)
     SSH_PORT=$(get_port "SSH" 22)
     DROPBEAR_PORT=$(get_port "Dropbear" 444)
     SSL_PORT=$(get_port "SSL" 443)
     PYTHON_PROXY_PORT=$(get_port "Python Proxy" 8080)
     BADVPN_PORT=$(get_port "BadVPN" 7300)
     V2RAY_WS_PATH=$(get_custom_path "V2Ray WebSocket" "/v2ray")
+    VMESS_WS_PATH=$(get_custom_path "VMess WebSocket" "/vmess")
     SSH_WS_PATH=$(get_custom_path "SSH WebSocket" "/ssh")
 
     # Save configuration
     cat << EOF > "$CONFIG_FILE"
 DOMAIN=$DOMAIN
-USE_TLS=$USE_TLS
 V2RAY_PORT=$V2RAY_PORT
+VMESS_PORT=$VMESS_PORT
 SSH_PORT=$SSH_PORT
 DROPBEAR_PORT=$DROPBEAR_PORT
 SSL_PORT=$SSL_PORT
 PYTHON_PROXY_PORT=$PYTHON_PROXY_PORT
 BADVPN_PORT=$BADVPN_PORT
 V2RAY_WS_PATH=$V2RAY_WS_PATH
+VMESS_WS_PATH=$VMESS_WS_PATH
 SSH_WS_PATH=$SSH_WS_PATH
 EOF
 
@@ -511,7 +532,7 @@ admin_menu() {
         echo "9. List Configured Ports"
         echo "10. Exit"
         read -p "Enter your choice: " choice
-        
+
         case $choice in
             1)
                 read -p "Enter username for new SSH user: " username
@@ -538,7 +559,7 @@ admin_menu() {
                 remove_v2ray_user "$username"
                 ;;
             7)
-                read -p "Enter service name (v2ray/ssh/dropbear/ssl/websocket/python_proxy/badvpn): " service
+                read -p "Enter service name (v2ray/vmess/ssh/dropbear/ssl/websocket/python_proxy/badvpn): " service
                 read -p "Enter new port number: " new_port
                 change_port "$service" "$new_port"
                 ;;
@@ -556,7 +577,7 @@ admin_menu() {
                 echo "Invalid choice. Please try again."
                 ;;
         esac
-        
+
         echo
     done
 }
