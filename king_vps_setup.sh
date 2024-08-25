@@ -53,7 +53,7 @@ update_system() {
 # Function to install necessary packages
 install_packages() {
     log_message "Installing necessary packages..."
-    sudo apt install -y curl wget unzip net-tools python3 python3-pip dropbear stunnel4 nginx build-essential jq uuid-runtime
+    sudo apt install -y curl wget unzip net-tools nginx build-essential jq uuid-runtime
 
     # Check if Certbot is already installed
     if ! command -v certbot &> /dev/null; then
@@ -62,9 +62,6 @@ install_packages() {
     else
         log_message "Certbot is already installed. Skipping installation."
     fi
-
-    # Install other Python dependencies
-    pip3 install websockets
 }
 
 # Function to install and configure V2Ray
@@ -140,40 +137,6 @@ generate_v2ray_config() {
 EOF
 }
 
-# Function to configure SSH
-configure_ssh() {
-    log_message "Configuring SSH..."
-    sed -i "s/#Port 22/Port $SSH_PORT/" /etc/ssh/sshd_config
-    systemctl restart sshd
-}
-
-# Function to configure Dropbear
-configure_dropbear() {
-    log_message "Configuring Dropbear..."
-    sed -i "s/NO_START=1/NO_START=0/" /etc/default/dropbear
-    sed -i "s/DROPBEAR_PORT=22/DROPBEAR_PORT=$DROPBEAR_PORT/" /etc/default/dropbear
-    systemctl restart dropbear
-}
-
-# Function to configure SSL
-configure_ssl() {
-    log_message "Configuring SSL..."
-    cat << EOF > /etc/stunnel/stunnel.conf
-pid = /var/run/stunnel.pid
-cert = /etc/letsencrypt/live/$DOMAIN/fullchain.pem
-key = /etc/letsencrypt/live/$DOMAIN/privkey.pem
-client = no
-socket = l:TCP_NODELAY=1
-socket = r:TCP_NODELAY=1
-
-[dropbear]
-accept = $SSL_PORT
-connect = 127.0.0.1:$DROPBEAR_PORT
-EOF
-
-    systemctl restart stunnel4
-}
-
 # Function to configure Nginx for WebSocket
 configure_nginx() {
     log_message "Configuring Nginx for WebSocket..."
@@ -216,80 +179,11 @@ server {
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
     }
-
-    location $SSH_WS_PATH {
-        proxy_redirect off;
-        proxy_pass http://127.0.0.1:$PYTHON_PROXY_PORT;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host \$http_host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_read_timeout 300s;
-        proxy_send_timeout 300s;
-    }
 }
 EOF
 
     ln -sf /etc/nginx/sites-available/websocket /etc/nginx/sites-enabled/
     nginx -t && systemctl restart nginx
-}
-
-# Function to setup Python Proxy
-setup_python_proxy() {
-    log_message "Setting up Python Proxy..."
-    cat << EOF > /root/custom_proxy.py
-import asyncio
-import websockets
-import logging
-
-# Set up logging
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
-
-async def proxy_handler(websocket, path):
-    logging.info(f"New connection attempt from {websocket.remote_address}")
-    try:
-        remote_host, remote_port = "127.0.0.1", $DROPBEAR_PORT
-        logging.info(f"Attempting to connect to {remote_host}:{remote_port}")
-        reader, writer = await asyncio.open_connection(remote_host, remote_port)
-        logging.info("Connection established")
-
-        async def forward(source, destination):
-            try:
-                while True:
-                    data = await source()
-                    if not data:
-                        break
-                    logging.debug(f"Forwarding {len(data)} bytes")
-                    await destination(data)
-            except Exception as e:
-                logging.error(f"Forward error: {e}")
-            finally:
-                if isinstance(destination, asyncio.StreamWriter):
-                    destination.close()
-                    await destination.wait_closed()
-
-        await asyncio.gather(
-            forward(websocket.recv, writer.write),
-            forward(reader.read, websocket.send)
-        )
-    except Exception as e:
-        logging.error(f"Proxy error: {e}")
-    finally:
-        await websocket.close()
-        logging.info("Connection closed")
-
-async def main():
-    server = await websockets.serve(proxy_handler, "0.0.0.0", $PYTHON_PROXY_PORT, ping_interval=None)
-    logging.info(f"Proxy server started on port {$PYTHON_PROXY_PORT}")
-    await server.wait_closed()
-
-if __name__ == "__main__":
-    asyncio.run(main())
-EOF
-
-    create_systemd_service "python-proxy" "/usr/bin/python3 /root/custom_proxy.py"
 }
 
 # Function to install and configure BadVPN
@@ -341,29 +235,6 @@ optimize_system() {
     systemctl restart nginx
 }
 
-# Function to add an SSH user
-add_ssh_user() {
-    local username=$1
-    local password=$2
-    useradd -m -s /bin/bash "$username"
-    echo "$username:$password" | chpasswd
-    echo "Added SSH user: $username"
-}
-
-# Function to list SSH users
-list_ssh_users() {
-    echo "SSH Users:"
-    echo "----------"
-    awk -F: '$3 >= 1000 && $1 != "nobody" {print $1}' /etc/passwd
-}
-
-# Function to remove SSH user
-remove_ssh_user() {
-    local username=$1
-    userdel -r "$username"
-    echo "Removed SSH user: $username"
-}
-
 # Function to add a V2Ray user
 add_v2ray_user() {
     local username=$1
@@ -402,7 +273,7 @@ remove_v2ray_user() {
     jq --arg user "$username" '.inbounds[1].settings.clients = [.inbounds[1].settings.clients[] | select(.email != $user)]' "$config_file" > "$config_file.tmp"
     mv "$config_file.tmp" "$config_file"
 
-        systemctl restart v2ray
+    systemctl restart v2ray
     echo "Removed V2Ray user: $username"
 }
 
@@ -419,26 +290,6 @@ change_port() {
         vmess)
             sed -i "s/\"port\": [0-9]*/\"port\": $new_port/" /usr/local/etc/v2ray/config.json
             systemctl restart v2ray
-            ;;
-        ssh)
-            sed -i "s/^Port .*/Port $new_port/" /etc/ssh/sshd_config
-            systemctl restart sshd
-            ;;
-        dropbear)
-            sed -i "s/DROPBEAR_PORT=.*/DROPBEAR_PORT=$new_port/" /etc/default/dropbear
-            systemctl restart dropbear
-            ;;
-        ssl)
-            sed -i "s/accept = .*/accept = $new_port/" /etc/stunnel/stunnel.conf
-            systemctl restart stunnel4
-            ;;
-        websocket)
-            sed -i "s/listen .*/listen $new_port ssl http2;/" /etc/nginx/sites-available/websocket
-            systemctl restart nginx
-            ;;
-        python_proxy)
-            sed -i "s/server = await websockets.serve(proxy_handler, \"0.0.0.0\", [0-9]*)/server = await websockets.serve(proxy_handler, \"0.0.0.0\", $new_port)/" /root/custom_proxy.py
-            systemctl restart python-proxy
             ;;
         badvpn)
             sed -i "s/--listen-addr 127.0.0.1:[0-9]*/--listen-addr 127.0.0.1:$new_port/" /etc/systemd/system/badvpn.service
@@ -464,10 +315,7 @@ update_domain() {
 
     sed -i "s/server_name .*/server_name $new_domain;/" /etc/nginx/sites-available/websocket
 
-    sed -i "s|cert = .*|cert = /etc/letsencrypt/live/$new_domain/fullchain.pem|" /etc/stunnel/stunnel.conf
-    sed -i "s|key = .*|key = /etc/letsencrypt/live/$new_domain/privkey.pem|" /etc/stunnel/stunnel.conf
-
-    systemctl restart nginx stunnel4
+    systemctl restart nginx
 
     echo "Updated domain to $new_domain"
 }
@@ -491,28 +339,18 @@ main() {
     DOMAIN=$(get_domain)
     V2RAY_PORT=$(get_port "V2Ray" 8443)
     VMESS_PORT=$(get_port "VMess" 8444)
-    SSH_PORT=$(get_port "SSH" 22)
-    DROPBEAR_PORT=$(get_port "Dropbear" 444)
-    SSL_PORT=$(get_port "SSL" 443)
-    PYTHON_PROXY_PORT=$(get_port "Python Proxy" 8080)
     BADVPN_PORT=$(get_port "BadVPN" 7300)
     V2RAY_WS_PATH=$(get_custom_path "V2Ray WebSocket" "/v2ray")
     VMESS_WS_PATH=$(get_custom_path "VMess WebSocket" "/vmess")
-    SSH_WS_PATH=$(get_custom_path "SSH WebSocket" "/ssh")
 
     # Save configuration
     cat << EOF > "$CONFIG_FILE"
 DOMAIN=$DOMAIN
 V2RAY_PORT=$V2RAY_PORT
 VMESS_PORT=$VMESS_PORT
-SSH_PORT=$SSH_PORT
-DROPBEAR_PORT=$DROPBEAR_PORT
-SSL_PORT=$SSL_PORT
-PYTHON_PROXY_PORT=$PYTHON_PROXY_PORT
 BADVPN_PORT=$BADVPN_PORT
 V2RAY_WS_PATH=$V2RAY_WS_PATH
 VMESS_WS_PATH=$VMESS_WS_PATH
-SSH_WS_PATH=$SSH_WS_PATH
 EOF
 
     # Update and install packages
@@ -521,11 +359,7 @@ EOF
 
     # Setup services
     install_v2ray
-    configure_ssh
-    configure_dropbear
-    configure_ssl
     configure_nginx
-    setup_python_proxy
     setup_badvpn
 
     # Optimize system
@@ -539,56 +373,40 @@ admin_menu() {
     while true; do
         echo
         echo "VPN Admin Menu"
-        echo "1. Add SSH User"
-        echo "2. List SSH Users"
-        echo "3. Remove SSH User"
-        echo "4. Add V2Ray User"
-        echo "5. List V2Ray Users"
-        echo "6. Remove V2Ray User"
-        echo "7. Change Port"
-        echo "8. Update Domain"
-        echo "9. List Configured Ports"
-        echo "10. Exit"
+        echo "1. Add V2Ray User"
+        echo "2. List V2Ray Users"
+        echo "3. Remove V2Ray User"
+        echo "4. Change Port"
+        echo "5. Update Domain"
+        echo "6. List Configured Ports"
+        echo "7. Exit"
         read -p "Enter your choice: " choice
 
         case $choice in
             1)
-                read -p "Enter username for new SSH user: " username
-                read -s -p "Enter password for new SSH user: " password
-                echo
-                add_ssh_user "$username" "$password"
-                ;;
-            2)
-                list_ssh_users
-                ;;
-            3)
-                read -p "Enter username of SSH user to remove: " username
-                remove_ssh_user "$username"
-                ;;
-            4)
                 read -p "Enter username for new V2Ray user: " username
                 add_v2ray_user "$username"
                 ;;
-            5)
+            2)
                 list_v2ray_users
                 ;;
-            6)
+            3)
                 read -p "Enter username of V2Ray user to remove: " username
                 remove_v2ray_user "$username"
                 ;;
-            7)
-                read -p "Enter service name (v2ray/vmess/ssh/dropbear/ssl/websocket/python_proxy/badvpn): " service
+            4)
+                read -p "Enter service name (v2ray/vmess/badvpn): " service
                 read -p "Enter new port number: " new_port
                 change_port "$service" "$new_port"
                 ;;
-            8)
+            5)
                 read -p "Enter new domain name: " new_domain
                 update_domain "$new_domain"
                 ;;
-            9)
+            6)
                 list_ports
                 ;;
-            10)
+            7)
                 return
                 ;;
             *)
