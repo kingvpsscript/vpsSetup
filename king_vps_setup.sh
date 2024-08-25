@@ -226,6 +226,8 @@ server {
         proxy_set_header Host \$http_host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
     }
 }
 EOF
@@ -240,34 +242,47 @@ setup_python_proxy() {
     cat << EOF > /root/custom_proxy.py
 import asyncio
 import websockets
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 async def proxy_handler(websocket, path):
+    logging.info(f"New connection attempt from {websocket.remote_address}")
     try:
         remote_host, remote_port = "127.0.0.1", $DROPBEAR_PORT
+        logging.info(f"Attempting to connect to {remote_host}:{remote_port}")
         reader, writer = await asyncio.open_connection(remote_host, remote_port)
-        
+        logging.info("Connection established")
+
         async def forward(source, destination):
             try:
                 while True:
                     data = await source()
                     if not data:
                         break
+                    logging.debug(f"Forwarding {len(data)} bytes")
                     await destination(data)
             except Exception as e:
-                print(f"Forward error: {e}")
+                logging.error(f"Forward error: {e}")
             finally:
-                writer.close()
-                await websocket.close()
+                if isinstance(destination, asyncio.StreamWriter):
+                    destination.close()
+                    await destination.wait_closed()
 
         await asyncio.gather(
             forward(websocket.recv, writer.write),
             forward(reader.read, websocket.send)
         )
     except Exception as e:
-        print(f"Proxy error: {e}")
+        logging.error(f"Proxy error: {e}")
+    finally:
+        await websocket.close()
+        logging.info("Connection closed")
 
 async def main():
-    server = await websockets.serve(proxy_handler, "0.0.0.0", $PYTHON_PROXY_PORT)
+    server = await websockets.serve(proxy_handler, "0.0.0.0", $PYTHON_PROXY_PORT, ping_interval=None)
+    logging.info(f"Proxy server started on port {$PYTHON_PROXY_PORT}")
     await server.wait_closed()
 
 if __name__ == "__main__":
@@ -387,7 +402,7 @@ remove_v2ray_user() {
     jq --arg user "$username" '.inbounds[1].settings.clients = [.inbounds[1].settings.clients[] | select(.email != $user)]' "$config_file" > "$config_file.tmp"
     mv "$config_file.tmp" "$config_file"
 
-    systemctl restart v2ray
+        systemctl restart v2ray
     echo "Removed V2Ray user: $username"
 }
 
@@ -409,7 +424,7 @@ change_port() {
             sed -i "s/^Port .*/Port $new_port/" /etc/ssh/sshd_config
             systemctl restart sshd
             ;;
-                dropbear)
+        dropbear)
             sed -i "s/DROPBEAR_PORT=.*/DROPBEAR_PORT=$new_port/" /etc/default/dropbear
             systemctl restart dropbear
             ;;
