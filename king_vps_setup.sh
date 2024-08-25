@@ -55,8 +55,13 @@ install_packages() {
     log_message "Installing necessary packages..."
     sudo apt install -y curl wget unzip net-tools python3 python3-pip dropbear stunnel4 nginx build-essential jq uuid-runtime
 
-    # Install Certbot and its Nginx plugin using pip
-    pip3 install certbot certbot-nginx
+    # Check if Certbot is already installed
+    if ! command -v certbot &> /dev/null; then
+        log_message "Installing Certbot..."
+        sudo apt install -y certbot python3-certbot-nginx
+    else
+        log_message "Certbot is already installed. Skipping installation."
+    fi
 
     # Install other Python dependencies
     pip3 install websockets
@@ -404,9 +409,7 @@ change_port() {
             sed -i "s/^Port .*/Port $new_port/" /etc/ssh/sshd_config
             systemctl restart sshd
             ;;
-        dropbear)
-            sed -i "s/DROPBEAR_PORT=.*/DROPBEAR_PORT=$new_port/" /etc/default/dropbear
-                    dropbear)
+                dropbear)
             sed -i "s/DROPBEAR_PORT=.*/DROPBEAR_PORT=$new_port/" /etc/default/dropbear
             systemctl restart dropbear
             ;;
